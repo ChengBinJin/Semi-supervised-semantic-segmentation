@@ -1,0 +1,6 @@
+log/
+model/
+sample/
+README.md
+src/.idea/
+src/__pycache__/

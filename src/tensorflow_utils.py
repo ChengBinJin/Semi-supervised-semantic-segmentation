@@ -395,10 +395,15 @@ def print_activations(t, logger=None):
         logger.info(t.op.name + ': {}'.format(t.get_shape().as_list()))
 
 
-def show_all_variables(logger=None):
+def show_all_variables(logger=None, scope=None):
     total_count = 0
 
-    for idx, op in enumerate(tf.compat.v1.trainable_variables()):
+    if scope is None:
+        variables = tf.compat.v1.trainable_variables()
+    else:
+        variables = tf.compat.v1.get_collection(tf.compat.v1.GraphKeys.TRAINABLE_VARIABLES, scope=scope)
+
+    for idx, op in enumerate(variables):
         shape = op.get_shape()
         count = np.prod(shape)
 

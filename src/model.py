@@ -29,6 +29,7 @@ class Model(object):
         self.resize_factor = resize_factor
         self.use_dice_loss = use_dice_loss
         self.lambda_one = lambda_one
+        self.lambda_two = lambda_two
 
         self.multi_test = False if self.is_train else multi_test
         self.degree = 10
@@ -60,7 +61,8 @@ class Model(object):
         self._init_test_graph()         # for test data
         self._best_metrics_record()     # metrics
         self._init_tensorboard()        # tensorboard
-        tf_utils.show_all_variables(logger=self.logger if self.is_train else None)
+        tf_utils.show_all_variables(logger=self.logger if self.is_train else None, scope='Gen')
+        tf_utils.show_all_variables(logger=self.logger if self.is_train else None, scope=None)
 
     def _build_graph(self):
         # Input placeholders
@@ -87,13 +89,15 @@ class Model(object):
 
         # Network forward for training
         self.pred_train = self.gen_obj(input_img=self.normalize(self.img_train),
-                                         train_mode=self.train_mode_tfph,
-                                         keep_rate=self.rate_tfph)
+                                       train_mode=self.train_mode_tfph,
+                                       keep_rate=self.rate_tfph)
         self.pred_cls_train = tf.math.argmax(self.pred_train, axis=-1)
 
         # Concatenation
-        self.real_pair = tf.concat([self.normalize(self.img_train), self.transform_seg(self.seg_img_train)], axis=3)
-        self.fake_pair = tf.concat([self.normalize(self.img_train), self.transform_seg(self.pred_cls_train)], axis=3)
+        self.real_pair = tf.concat(
+            [self.normalize(self.img_train), self.transform_seg(self.convert_one_hot(self.seg_img_train))], axis=3)
+        self.fake_pair = tf.concat(
+            [self.normalize(self.img_train), self.transform_seg(tf.sigmoid(self.pred_train))], axis=3)
         # self.fake_pair_2 = tf.concat([tf.random.shuffle(self.normalize(self.img_train)),
         #                               tf.random.shuffle(self.transform_seg(self.seg_img_train))], axis=3)
         # self.fake_pair = tf.concat([self.fake_pair_1, self.fake_pair_2], axis=0)
@@ -105,7 +109,7 @@ class Model(object):
             labels=self.convert_one_hot(self.seg_img_train)))
 
         # Adversarial loss
-        self.gen_adv_loss =self.generator_loss(self.dis_obj, self.fake_pair)
+        self.gen_loss = self.generator_loss(self.dis_obj, self.fake_pair)
 
         # Additional loss function
         # Dice coefficient loss term
@@ -114,23 +118,26 @@ class Model(object):
             self.dice_loss = self.generalized_dice_loss(labels=self.seg_img_train, logits=self.pred_train,
                                                         hyper_parameter=self.lambda_one)
 
-        # Total loss = Data loss + Regularization term + Dice coefficient loss
-        self.gen_loss = self.data_loss + self.gen_adv_loss, self.dice_loss
+        # Total loss = Data loss + Generative adversarial loss + Dice coefficient loss
+        self.total_loss = self.data_loss + self.gen_loss + self.dice_loss
 
         # Define discriminator loss
         self.dis_loss = self.discriminator_loss(self.dis_obj, self.real_pair, self.fake_pair)
 
-        # Optimizer
-        train_op_ = self.init_optimizer(loss=self.gen_loss, name='Adam')
-        train_ops = [train_op_] + self.gen_ops
-        self.train_op = tf.group(*train_ops)
+        # Optimizers
+        gen_train_op = self.init_optimizer(loss=self.gen_loss, variables=self.gen_obj.variables, name='Adam_gen')
+        gen_train_ops = [gen_train_op] + self.gen_ops
+        self.gen_optim = tf.group(*gen_train_ops)
 
-    @staticmethod
-    def generator_loss(dis_obj, fake_img):
+        dis_train_op = self.init_optimizer(loss=self.dis_loss, variables=self.dis_obj.variables, name='Adam_dis')
+        dis_train_ops = [dis_train_op] + self.dis_ops
+        self.dis_optim = tf.group(*dis_train_ops)
+
+    def generator_loss(self, dis_obj, fake_img):
         d_logit_fake = dis_obj(fake_img)
         loss = tf.math.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(logits=d_logit_fake ,
                                                                            labels=tf.ones_like(d_logit_fake)))
-        return loss
+        return self.lambda_two * loss
 
     @staticmethod
     def discriminator_loss(dis_obj, real_img, fake_img):
@@ -144,7 +151,6 @@ class Model(object):
 
         loss = 0.5 * (error_real + error_fake)
         return loss
-
 
     def generalized_dice_loss(self, labels, logits, hyper_parameter=1.0):
         # This implementation refers to srcolinas's dice_loss.py
@@ -404,7 +410,7 @@ class Model(object):
                                                        trainable=False)
         self.assign_best_f1_score = tf.assign(self.best_f1_score, value=self.best_f1_score_tfph)
 
-    def init_optimizer(self, loss, name=None):
+    def init_optimizer(self, loss, variables, name=None):
         with tf.compat.v1.variable_scope(name):
             global_step = tf.Variable(0., dtype=tf.float32, trainable=False)
             start_learning_rate = self.lr
@@ -419,16 +425,20 @@ class Model(object):
                                      start_learning_rate))
             self.tb_lr = tf.compat.v1.summary.scalar('learning_rate', learning_rate)
 
-            learn_step = tf.compat.v1.train.AdamOptimizer(learning_rate=learning_rate, beta1=0.99).minimize(
-                loss, global_step=global_step)
+            learn_step = tf.compat.v1.train.AdamOptimizer(learning_rate=learning_rate, beta1=0.5).minimize(
+                loss, global_step=global_step, var_list=variables)
 
         return learn_step
 
     def _init_tensorboard(self):
+        # self.gen_loss = self.data_loss + self.gen_adv_loss, self.dice_loss
         self.tb_total = tf.summary.scalar('Loss/total_loss', self.total_loss)
         self.tb_data = tf.summary.scalar('Loss/data_loss', self.data_loss)
+        self.tb_adv = tf.summary.scalar('Loss/gen_loss', self.gen_loss)
         self.tb_dice = tf.summary.scalar('Loss/dice_loss', self.dice_loss)
-        self.summary_op = tf.summary.merge(inputs=[self.tb_total, self.tb_data, self.tb_dice, self.tb_lr])
+        self.tb_dis = tf.summary.scalar('Loss/dis_loss', self.dis_loss)
+        self.summary_op = tf.summary.merge(
+            inputs=[self.tb_total, self.tb_data, self.tb_adv, self.tb_dice, self.tb_dis, self.tb_lr])
 
         self.tb_mIoU = tf.summary.scalar('Acc/mIoU', self.mIoU_metric)
         self.tb_accuracy = tf.summary.scalar('Acc/accuracy', self.accuracy_metric)
@@ -720,11 +730,11 @@ class Generator(object):
                 output = tf_utils.conv2d(s9_conv3, output_dim=self.num_classes, k_h=1, k_w=1, d_h=1, d_w=1,
                                          padding=self.padding, initializer='He', name='output', logger=self.logger)
 
-        # set reuse=True for next call
-        self.reuse = True
-        self.variables = tf.compat.v1.get_collection(tf.compat.v1.GraphKeys.TRAINABLE_VARIABLES, scope=self.name)
+            # set reuse=True for next call
+            self.reuse = True
+            self.variables = tf.compat.v1.get_collection(tf.compat.v1.GraphKeys.TRAINABLE_VARIABLES, scope=self.name)
 
-        return output
+            return output
 
 
 class Discriminator(object):
@@ -770,11 +780,11 @@ class Discriminator(object):
             h4_lrelu = tf_utils.lrelu(h4_norm, logger=self.logger, name='h4_lrelu')
 
             # H6: (20, 13) -> (20, 13)
-            output = tf_utils.conv2d(h3_lrelu, output_dim=self.conv_dims[5], k_h=3, k_w=3, d_h=1, d_w=1,
+            output = tf_utils.conv2d(h4_lrelu, output_dim=self.conv_dims[5], k_h=3, k_w=3, d_h=1, d_w=1,
                                      initializer='He', logger=self.logger, name='output_conv2d')
 
             # set reuse=True for next call
             self.reuse = True
             self.variables = tf.compat.v1.get_collection(tf.compat.v1.GraphKeys.TRAINABLE_VARIABLES, scope=self.name)
 
-        return output
+            return output

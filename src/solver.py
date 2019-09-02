@@ -33,16 +33,16 @@ class Solver(object):
             self.model.train_mode_tfph: True
         }
 
-        train_op = self.model.train_op
-        total_loss_op = self.model.total_loss
-        data_loss_op = self.model.data_loss
-        dice_loss_op = self.model.dice_loss
-        summary_op = self.model.summary_op
+        # Update discriminator and generator
+        self.sess.run(self.model.dis_optim, feed_dict=feed)
+        self.sess.run(self.model.gen_optim, feed_dict=feed)
 
-        _, total_loss, data_loss, dice_loss, summary = self.sess.run(
-            [train_op, total_loss_op, data_loss_op, dice_loss_op, summary_op], feed_dict=feed)
+        # Run g_optim twice to make sure that d_loss does not go to zero (different from paper)
+        _, total_loss, data_loss, gen_loss, dice_loss, dis_loss, summary = self.sess.run(
+            [self.model.gen_optim, self.model.total_loss, self.model.data_loss, self.model.gen_loss,
+             self.model.dice_loss, self.model.dis_loss, self.model.summary_op], feed_dict=feed)
 
-        return total_loss, data_loss, dice_loss, summary
+        return total_loss, data_loss, gen_loss, dice_loss, dis_loss, summary
 
     def eval(self, tb_writer=None, iter_time=None, save_dir=None, is_debug=False):
         if self.multi_test:

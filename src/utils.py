@@ -10,7 +10,7 @@ import cv2
 import numpy as np
 
 
-def make_folders(is_train=True, cur_time=None, subfolder=None):
+def make_folders(is_train=True, cur_time=None, subfolder=''):
     model_dir = os.path.join('../model', subfolder, '{}'.format(cur_time))
     log_dir = os.path.join('../log', subfolder, '{}'.format(cur_time))
     sample_dir = os.path.join('../sample', subfolder, '{}'.format(cur_time))
@@ -76,7 +76,6 @@ def print_main_parameters(logger, flags, is_train=False):
         logger.info('lambda_two: \t\t\t{}'.format(flags.lambda_two))
         logger.info('is_train: \t\t\t{}'.format(flags.is_train))
         logger.info('learing_rate: \t\t{}'.format(flags.learning_rate))
-        logger.info('weight_decay: \t\t{}'.format(flags.weight_decay))
         logger.info('iters: \t\t\t{}'.format(flags.iters))
         logger.info('print_freq: \t\t\t{}'.format(flags.print_freq))
         logger.info('sample_freq: \t\t{}'.format(flags.sample_freq))
@@ -95,7 +94,6 @@ def print_main_parameters(logger, flags, is_train=False):
         print('-- lambda_two: \t\t\t{}'.format(flags.lambda_two))
         print('-- is_train: \t\t{}'.format(flags.is_train))
         print('-- learing_rate: \t{}'.format(flags.learning_rate))
-        print('-- weight_decay: \t{}'.format(flags.weight_decay))
         print('-- iters: \t\t{}'.format(flags.iters))
         print('-- print_freq: \t\t{}'.format(flags.print_freq))
         print('-- sample_freq: \t{}'.format(flags.sample_freq))

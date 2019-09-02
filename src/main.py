@@ -11,13 +11,13 @@ from datetime import datetime
 import tensorflow as tf
 import utils as utils
 from dataset import Dataset
-# from model import UNet
-# from solver import Solver
+from model import UNet
+from solver import Solver
 
 FLAGS = tf.flags.FLAGS
 tf.flags.DEFINE_string('gpu_index', '0', 'gpu index if you have multiple gpus, default: 0')
 tf.flags.DEFINE_string('method', 'U-Net', 'Segmentation model, default: U-Net')
-tf.flags.DEFINE_integer('batch_size', 8, 'batch size for one iteration, default: 1')
+tf.flags.DEFINE_integer('batch_size', 2, 'batch size for one iteration, default: 1')
 tf.flags.DEFINE_float('resize_factor', 1.0, 'resize original input image, default: 1.0')
 tf.flags.DEFINE_bool('multi_test', True, 'multiple rotation feedforwards for test stage, default: False')
 tf.flags.DEFINE_bool('use_dice_loss', True, 'use dice coefficient loss or not, default: True')
@@ -29,9 +29,9 @@ tf.flags.DEFINE_string('dataset', 'OpenEDS', 'dataset name, default: OpenEDS')
 tf.flags.DEFINE_bool('is_train', True, 'training or inference mode, default: True')
 tf.flags.DEFINE_float('learning_rate', 1e-3, 'initial learning rate for optimizer, default: 0.001')
 tf.flags.DEFINE_float('weight_decay', 1e-4, 'weight decay for model to handle overfitting, default: 0.0001')
-tf.flags.DEFINE_integer('iters', 400000, 'number of iterations, default: 400,000')
-tf.flags.DEFINE_integer('print_freq', 50, 'print frequency for loss information, default: 50')
-tf.flags.DEFINE_integer('sample_freq', 1000, 'sample frequence for checking qualitative evaluation, default: 1000')
+tf.flags.DEFINE_integer('iters', 20, 'number of iterations, default: 400,000')
+tf.flags.DEFINE_integer('print_freq', 5, 'print frequency for loss information, default: 50')
+tf.flags.DEFINE_integer('sample_freq', 10, 'sample frequence for checking qualitative evaluation, default: 1000')
 tf.flags.DEFINE_integer('eval_freq', 4000, 'evaluation frequencey for evaluation of the batch accuracy, default: 4000')
 tf.flags.DEFINE_string('load_model', None, 'folder of saved model that you wish to continue training '
                                            '(e.g. 20190831-194923), default: None')
@@ -59,37 +59,37 @@ def main(_):
     data = Dataset(name=FLAGS.dataset, is_train=FLAGS.is_train, resized_factor=FLAGS.resize_factor, log_dir=log_dir)
 
     # Initialize model
-    # model = UNet(decode_img_shape=data.decode_img_shape,
-    #              output_shape=data.single_img_shape,
-    #              num_classes=data.num_classes,
-    #              data_path=data(is_train=FLAGS.is_train),
-    #              batch_size=FLAGS.batch_size,
-    #              lr=FLAGS.learning_rate,
-    #              weight_decay=FLAGS.weight_decay,
-    #              total_iters=FLAGS.iters,
-    #              is_train=FLAGS.is_train,
-    #              log_dir=log_dir,
-    #              method=FLAGS.method,
-    #              multi_test=FLAGS.multi_test,
-    #              resize_factor=FLAGS.resize_factor,
-    #              use_dice_loss=FLAGS.use_dice_loss,
-    #              lambda_one=FLAGS.lambda_one,
-    #              lambda_two=FLAGS.lambda_two,
-    #              name='UNet')
+    model = UNet(decode_img_shape=data.decode_img_shape,
+                 output_shape=data.single_img_shape,
+                 num_classes=data.num_classes,
+                 data_path=data(is_train=FLAGS.is_train),
+                 batch_size=FLAGS.batch_size,
+                 lr=FLAGS.learning_rate,
+                 weight_decay=FLAGS.weight_decay,
+                 total_iters=FLAGS.iters,
+                 is_train=FLAGS.is_train,
+                 log_dir=log_dir,
+                 method=FLAGS.method,
+                 multi_test=FLAGS.multi_test,
+                 resize_factor=FLAGS.resize_factor,
+                 use_dice_loss=FLAGS.use_dice_loss,
+                 lambda_one=FLAGS.lambda_one,
+                 lambda_two=FLAGS.lambda_two,
+                 name='UNet')
 
     # Initialize solver
-    # solver = Solver(model=model,
-    #                 data=data,
-    #                 is_train=FLAGS.is_train,
-    #                 multi_test=FLAGS.multi_test)
+    solver = Solver(model=model,
+                    data=data,
+                    is_train=FLAGS.is_train,
+                    multi_test=FLAGS.multi_test)
 
-    # # Initialize saver
-    # saver = tf.compat.v1.train.Saver(max_to_keep=1)
-    #
-    # if FLAGS.is_train is True:
-    #     train(solver, saver, logger, model_dir, log_dir, sample_dir)
-    # else:
-    #     test(solver, saver, model_dir, val_dir, test_dir)
+    # Initialize saver
+    saver = tf.compat.v1.train.Saver(max_to_keep=1)
+
+    if FLAGS.is_train is True:
+        train(solver, saver, logger, model_dir, log_dir, sample_dir)
+    else:
+        test(solver, saver, model_dir, val_dir, test_dir)
 
 
 def train(solver, saver, logger, model_dir, log_dir, sample_dir):
@@ -118,17 +118,22 @@ def train(solver, saver, logger, model_dir, log_dir, sample_dir):
 
     try:
         while iter_time < FLAGS.iters:
-            gen_loss, data_loss, reg_term, dice_loss, adv_loss, dis_loss, summary = solver.train()
+            # gen_loss, data_loss, reg_term, dice_loss, adv_loss, dis_loss, summary = solver.train()
+            gen_loss, data_loss, dice_loss, adv_loss, dis_loss, summary = solver.train()
 
             # Write to tensorboard
             tb_writer.add_summary(summary, iter_time)
             tb_writer.flush()
 
             # Print loss information
+            # if (iter_time % FLAGS.print_freq == 0) or (iter_time + 1 == FLAGS.iters):
+            #     msg = "[{0:6} / {1:6}] Gen. loss: {2:.3f}, Data loss: {3:.3f}, Reg. term: {4:.3f}, Dice loss: {5:.3f} " \
+            #           "Adv. loss: {6:.3f}, Dis. loss: {7:.3f}"
+            #     print(msg.format(iter_time, FLAGS.iters, gen_loss, data_loss, reg_term, dice_loss, adv_loss, dis_loss))
             if (iter_time % FLAGS.print_freq == 0) or (iter_time + 1 == FLAGS.iters):
-                msg = "[{0:6} / {1:6}] Gen. loss: {2:.3f}, Data loss: {3:.3f}, Reg. term: {4:.3f}, Dice loss: {5:.3f} " \
-                      "Adv. loss: {6:.3f}, Dis. loss: {7:.3f}"
-                print(msg.format(iter_time, FLAGS.iters, gen_loss, data_loss, reg_term, dice_loss, adv_loss, dis_loss))
+                msg = "[{0:6} / {1:6}] Gen. loss: {2:.3f}, Data loss: {3:.3f}, Dice loss: {4:.3f} " \
+                      "Adv. loss: {5:.3f}, Dis. loss: {6:.3f}"
+                print(msg.format(iter_time, FLAGS.iters, gen_loss, data_loss, dice_loss, adv_loss, dis_loss))
 
             # Sampling predictive results
             if (iter_time % FLAGS.sample_freq == 0) or (iter_time + 1 == FLAGS.iters):

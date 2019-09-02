@@ -7,6 +7,8 @@
 
 import os
 import logging
+import cv2
+import numpy as np
 
 
 def make_folders(is_train=True, cur_time=None, subfolder=None):
@@ -100,3 +102,87 @@ def print_main_parameters(logger, flags, is_train=False):
         print('-- sample_freq: \t{}'.format(flags.sample_freq))
         print('-- eval_freq: \t\t{}'.format(flags.eval_freq))
         print('-- load_model: \t\t{}'.format(flags.load_model))
+
+
+def save_imgs(img_stores, iter_time=None, save_dir=None, margin=5, img_name=None, name_append='', is_vertical=True):
+    if not os.path.isdir(save_dir):
+        os.makedirs(save_dir)
+
+    num_categories = len(img_stores)
+    for i in range(num_categories):
+        if img_stores[i].shape[-1] == 1:
+            img_stores[i] = np.squeeze(img_stores[i], axis=-1)
+
+        img_stores[i] = img_stores[i].astype(np.uint8)
+
+    num_imgs, h, w = img_stores[0].shape
+
+    if is_vertical:
+        canvas = np.zeros((num_categories * h + (num_categories + 1) * margin,
+                           num_imgs * w + (num_imgs + 1) * margin, 3), dtype=np.uint8)
+
+        for i in range(num_imgs):
+            for j in range(num_categories):
+                if j != 0:  # label map
+                    canvas[(j+1)*margin+j*h:(j+1)*margin+(j+1)*h, (i+1)*margin+i*w:(i+1)*(margin+w), :] = \
+                        convert_color_label(img_stores[j][i])
+                else:
+                    canvas[(j+1)*margin+j*h:(j+1)*margin+(j+1)*h, (i+1)*margin+i*w:(i+1)*(margin+w), :] = \
+                        np.dstack((img_stores[j][i], img_stores[j][i], img_stores[j][i]))
+
+    else:
+        canvas = np.zeros((num_imgs * h + (num_imgs + 1) * margin,
+                           num_categories * w + (num_categories + 1) * margin, 3), dtype=np.uint8)
+
+        for i in range(num_imgs):
+            for j in range(num_categories):
+                if j != 0:
+                    canvas[(i+1)*margin+i*h:(i+1)*(margin+h), (j+1)*margin+j*w:(j+1)*margin+(j+1)*w, :] = \
+                        convert_color_label(img_stores[j][i])
+                else:
+                    canvas[(i+1)*margin+i*h:(i+1)*(margin+h), (j+1)*margin+j*w:(j+1)*margin+(j+1)*w, :] = \
+                        np.dstack((img_stores[j][i], img_stores[j][i], img_stores[j][i]))
+
+    if img_name is None:
+        cv2.imwrite(os.path.join(save_dir, str(iter_time).zfill(6) + '.png'), canvas)
+    else:
+        cv2.imwrite(os.path.join(save_dir, name_append+img_name[0]), canvas)
+
+
+def convert_color_label(img):
+    yellow = [102, 255, 255]
+    green = [102, 204, 0]
+    cyan = [153, 153, 0]
+    violet = [102, 0, 102]
+
+    # 0: background - violet
+    # 1: sclera - cyan
+    # 2: iris - green
+    # 3: pupil - yellow
+    img_rgb = np.zeros([*img.shape, 3], dtype=np.uint8)
+    for i, color in enumerate([violet, cyan, green, yellow]):
+        img_rgb[img == i] = color
+
+    return img_rgb
+
+
+def save_npy(data, save_dir, file_name, size=(640, 400)):
+    save_dir = os.path.join(save_dir, 'npy')
+    if not os.path.isdir(save_dir):
+        os.makedirs(save_dir)
+
+    # Extract image number from [000002342342_U23.png]
+    file_name = file_name[0].split('_')[0]
+
+    # Convert [1, H, W] to [H, W]
+    data = np.squeeze(data)
+
+    # Resize from [H/2, W/2] to [H, W]
+    if data.shape[0:2] != size:
+        data = cv2.resize(data, dsize=(size[1], size[0]), interpolation=cv2.INTER_NEAREST)
+
+    # Convert data type from int32 to uint8
+    data = data.astype(np.uint8)
+
+    # Save data in npy format by requirement
+    np.save(os.path.join(save_dir, file_name), data)

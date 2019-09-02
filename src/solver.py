@@ -234,7 +234,7 @@ class Solver(object):
         utils.save_imgs(img_stores=[img[:num_imgs], pred_cls[:num_imgs], seg_img[:num_imgs]],
                         iter_time=iter_time,
                         save_dir=save_dir,
-                        is_vertical=True)
+                        is_vertical=False)
 
     def set_best_mIoU(self, best_mIoU):
         self.sess.run(self.model.assign_best_mIoU, feed_dict={self.model.best_mIoU_tfph: best_mIoU})

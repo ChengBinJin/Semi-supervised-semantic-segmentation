@@ -16,7 +16,7 @@ from reader import Reader
 
 class Model(object):
     def __init__(self, decode_img_shape=(320, 400, 1), output_shape=(320, 200, 1), num_classes=4,
-                 data_path=(None, None), batch_size=1, lr=1e-3, weight_decay=1e-4, total_iters=2e5, is_train=True,
+                 data_path=(None, None), batch_size=1, lr=1e-3, total_iters=2e5, is_train=True,
                  log_dir=None, method=None, multi_test=True, resize_factor=0.5, use_dice_loss=False,
                  lambda_one=1.0, lambda_two=0.1, name='UNet'):
         self.decode_img_shape = decode_img_shape
@@ -40,7 +40,6 @@ class Model(object):
         self.data_path = data_path
         self.batch_size = batch_size
         self.lr = lr
-        self.weight_decay = weight_decay
         self.total_steps = total_iters
         self.start_decay_step = int(self.total_steps * 0.25)
         self.decay_steps = int(self.total_steps * 0.5)
@@ -82,29 +81,29 @@ class Model(object):
 
         # Initialize generator and discriminator
         self.gen_obj = Generator(name='Gen', conv_dims=self.gen_c, padding='SAME', logger=self.logger,
-                                 resize_factor=self.resize_factor, use_batch_norm=self.use_batch_norm,
+                                 resize_factor=self.resize_factor, norm='instance',
                                  num_classes=self.num_classes, _ops=self.gen_ops)
         self.dis_obj = Discriminator(name='Dis', dis_c=self.dis_c, norm='instance', logger=self.logger,
                                      _ops=self.dis_ops)
 
         # Network forward for training
-        self.pred_train = self.gen_obj(input_img=self.normalize(self.img_train),
-                                       train_mode=self.train_mode_tfph,
-                                       keep_rate=self.rate_tfph)
+        self.pred_train, gen_output = self.gen_obj(input_img=self.normalize(self.img_train),
+                                                   train_mode=self.train_mode_tfph,
+                                                   keep_rate=self.rate_tfph)
         self.pred_cls_train = tf.math.argmax(self.pred_train, axis=-1)
 
         # Concatenation
         self.real_pair = tf.concat(
-            [self.normalize(self.img_train), self.transform_seg(self.convert_one_hot(self.seg_img_train))], axis=3)
+            [self.normalize(self.img_train), self.transform_seg(self.seg_img_train)], axis=3)
         self.fake_pair = tf.concat(
-            [self.normalize(self.img_train), self.transform_seg(tf.sigmoid(self.pred_train))], axis=3)
+            [self.normalize(self.img_train), gen_output], axis=3)
         # self.fake_pair_2 = tf.concat([tf.random.shuffle(self.normalize(self.img_train)),
         #                               tf.random.shuffle(self.transform_seg(self.seg_img_train))], axis=3)
         # self.fake_pair = tf.concat([self.fake_pair_1, self.fake_pair_2], axis=0)
 
         # Define generator loss
         # Data loss
-        self.data_loss = tf.math.reduce_mean(tf.nn.softmax_cross_entropy_with_logits_v2(
+        self.data_loss = self.lambda_one * tf.math.reduce_mean(tf.nn.softmax_cross_entropy_with_logits_v2(
             logits=self.pred_train,
             labels=self.convert_one_hot(self.seg_img_train)))
 
@@ -116,7 +115,7 @@ class Model(object):
         self.dice_loss = tf.constant(0.)
         if self.use_dice_loss:
             self.dice_loss = self.generalized_dice_loss(labels=self.seg_img_train, logits=self.pred_train,
-                                                        hyper_parameter=self.lambda_one)
+                                                        hyper_parameter=self.lambda_two)
 
         # Total loss = Data loss + Generative adversarial loss + Dice coefficient loss
         self.total_loss = self.data_loss + self.gen_loss + self.dice_loss
@@ -133,11 +132,12 @@ class Model(object):
         dis_train_ops = [dis_train_op] + self.dis_ops
         self.dis_optim = tf.group(*dis_train_ops)
 
-    def generator_loss(self, dis_obj, fake_img):
+    @staticmethod
+    def generator_loss(dis_obj, fake_img):
         d_logit_fake = dis_obj(fake_img)
         loss = tf.math.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(logits=d_logit_fake ,
                                                                            labels=tf.ones_like(d_logit_fake)))
-        return self.lambda_two * loss
+        return loss
 
     @staticmethod
     def discriminator_loss(dis_obj, real_img, fake_img):
@@ -207,15 +207,15 @@ class Model(object):
             img_val_2 = tf.slice(img_val, begin=[self.num_try, 0, 0, 0], size=[self.num_try, h, w, c])
 
             # Network forward for validation data
-            pred_val_1 = self.gen_obj(input_img=self.normalize(img_val_1), train_mode=self.train_mode_tfph,
-                                      keep_rate=self.rate_tfph)
-            pred_val_2 = self.gen_obj(input_img=self.normalize(img_val_2), train_mode=self.train_mode_tfph,
-                                      keep_rate=self.rate_tfph)
+            pred_val_1, _ = self.gen_obj(input_img=self.normalize(img_val_1), train_mode=self.train_mode_tfph,
+                                         keep_rate=self.rate_tfph)
+            pred_val_2, _ = self.gen_obj(input_img=self.normalize(img_val_2), train_mode=self.train_mode_tfph,
+                                         keep_rate=self.rate_tfph)
             pred_val = tf.concat(values=[pred_val_1, pred_val_2], axis=0)
         else:
-            pred_val = self.gen_obj(input_img=self.normalize(img_val),
-                                    train_mode=self.train_mode_tfph,
-                                    keep_rate=self.rate_tfph)
+            pred_val, _ = self.gen_obj(input_img=self.normalize(img_val),
+                                       train_mode=self.train_mode_tfph,
+                                       keep_rate=self.rate_tfph)
 
         # Since multi_test, we need inversely rotate back to the original segImg
         if self.multi_test:
@@ -348,14 +348,14 @@ class Model(object):
             img_test_2 = tf.slice(img_test, begin=[self.num_try, 0, 0, 0], size=[self.num_try, h, w, c])
 
             # Network forward for test data
-            pred_test_1 = self.gen_obj(input_img=self.normalize(img_test_1), train_mode=self.train_mode_tfph,
-                                       keep_rate=self.rate_tfph)
-            pred_test_2 = self.gen_obj(input_img=self.normalize(img_test_2), train_mode=self.train_mode_tfph,
-                                       keep_rate=self.rate_tfph)
+            pred_test_1, _ = self.gen_obj(input_img=self.normalize(img_test_1), train_mode=self.train_mode_tfph,
+                                          keep_rate=self.rate_tfph)
+            pred_test_2, _ = self.gen_obj(input_img=self.normalize(img_test_2), train_mode=self.train_mode_tfph,
+                                          keep_rate=self.rate_tfph)
             pred_test = tf.concat(values=[pred_test_1, pred_test_2], axis=0)
         else:
-            pred_test = self.gen_obj(input_img=self.normalize(img_test), train_mode=self.train_mode_tfph,
-                                     keep_rate=self.rate_tfph)
+            pred_test, _ = self.gen_obj(input_img=self.normalize(img_test), train_mode=self.train_mode_tfph,
+                                        keep_rate=self.rate_tfph)
 
         # Since multi_test, we need inversely rotate back to the original segImg
         if self.multi_test:
@@ -431,21 +431,20 @@ class Model(object):
         return learn_step
 
     def _init_tensorboard(self):
-        # self.gen_loss = self.data_loss + self.gen_adv_loss, self.dice_loss
-        self.tb_total = tf.summary.scalar('Loss/total_loss', self.total_loss)
-        self.tb_data = tf.summary.scalar('Loss/data_loss', self.data_loss)
-        self.tb_adv = tf.summary.scalar('Loss/gen_loss', self.gen_loss)
-        self.tb_dice = tf.summary.scalar('Loss/dice_loss', self.dice_loss)
-        self.tb_dis = tf.summary.scalar('Loss/dis_loss', self.dis_loss)
+        self.tb_total = tf.compat.v1.summary.scalar('Loss/total_loss', self.total_loss)
+        self.tb_data = tf.compat.v1.summary.scalar('Loss/data_loss', self.data_loss)
+        self.tb_adv = tf.compat.v1.summary.scalar('Loss/gen_loss', self.gen_loss)
+        self.tb_dice = tf.compat.v1.summary.scalar('Loss/dice_loss', self.dice_loss)
+        self.tb_dis = tf.compat.v1.summary.scalar('Loss/dis_loss', self.dis_loss)
         self.summary_op = tf.summary.merge(
             inputs=[self.tb_total, self.tb_data, self.tb_adv, self.tb_dice, self.tb_dis, self.tb_lr])
 
-        self.tb_mIoU = tf.summary.scalar('Acc/mIoU', self.mIoU_metric)
-        self.tb_accuracy = tf.summary.scalar('Acc/accuracy', self.accuracy_metric)
-        self.tb_precision = tf.summary.scalar('Acc/precision', self.precision_metric)
-        self.tb_recall = tf.summary.scalar('Acc/recall', self.recall_metric)
-        self.tb_f1_score = tf.summary.scalar('Acc/f1_score', self.f1_score_metric)
-        self.metric_summary_op = tf.summary.merge(inputs=[self.tb_mIoU, self.tb_accuracy,
+        self.tb_mIoU = tf.compat.v1.summary.scalar('Acc/mIoU', self.mIoU_metric)
+        self.tb_accuracy = tf.compat.v1.summary.scalar('Acc/accuracy', self.accuracy_metric)
+        self.tb_precision = tf.compat.v1.summary.scalar('Acc/precision', self.precision_metric)
+        self.tb_recall = tf.compat.v1.summary.scalar('Acc/recall', self.recall_metric)
+        self.tb_f1_score = tf.compat.v1.summary.scalar('Acc/f1_score', self.f1_score_metric)
+        self.metric_summary_op = tf.compat.v1.summary.merge(inputs=[self.tb_mIoU, self.tb_accuracy,
                                                           self.tb_precision, self.tb_recall, self.tb_f1_score])
 
     @staticmethod
@@ -454,8 +453,11 @@ class Model(object):
 
     def transform_seg(self, img):
         # label 0~3
-        img = img * 255. / (self.num_classes - 1)
-        img = img / 127.5 - 1.
+        # img = img * 255. / (self.num_classes - 1)
+        # img = img / 127.5 - 1.
+        # img  = img * 2. - 1.
+        img = 1. - tf.cast(tf.math.equal(img, tf.zeros_like(img)), dtype=tf.float32)
+        print('img shape: {}'.format(img.get_shape().as_list()))
         return img
 
     def convert_one_hot(self, data):
@@ -467,14 +469,14 @@ class Model(object):
         return data
 
 class Generator(object):
-    def __init__(self, name=None, conv_dims=None, padding='SAME', logger=None, resize_factor=0.5, use_batch_norm=True,
+    def __init__(self, name=None, conv_dims=None, padding='SAME', logger=None, resize_factor=0.5, norm='instance',
                  num_classes=4, _ops=None):
         self.name = name
         self.conv_dims = conv_dims
         self.padding = padding
         self.logger = logger
         self.resize_factor = resize_factor
-        self.use_batch_norm = use_batch_norm
+        self.norm = norm
         self.num_classes = num_classes
         self._ops = _ops
         self.reuse = False
@@ -491,9 +493,8 @@ class Generator(object):
 
                 s0_conv2 = tf_utils.conv2d(x=s0_conv1, output_dim=self.conv_dims[0], k_h=3, k_w=3, d_h=1, d_w=1,
                                            padding=self.padding, initializer='He', name='s0_conv2', logger=self.logger)
-                if self.use_batch_norm:
-                    s0_conv2 = tf_utils.norm(s0_conv2, name='s0_norm1', _type='batch', _ops=self._ops,
-                                             is_train=train_mode, logger=self.logger)
+                s0_conv2 = tf_utils.norm(s0_conv2, name='s0_norm1', _type=self.norm, _ops=self._ops,
+                                         is_train=train_mode, logger=self.logger)
                 s0_conv2 = tf_utils.relu(s0_conv2, name='relu_s0_conv2', logger=self.logger)
 
                 # Stage 1
@@ -501,16 +502,14 @@ class Generator(object):
 
                 s1_conv1 = tf_utils.conv2d(x=s1_maxpool, output_dim=self.conv_dims[0], k_h=3, k_w=3, d_h=1, d_w=1,
                                            padding=self.padding, initializer='He', name='s1_conv1', logger=self.logger)
-                if self.use_batch_norm:
-                    s1_conv1 = tf_utils.norm(s1_conv1, name='s1_norm0', _type='batch', _ops=self._ops,
-                                             is_train=train_mode, logger=self.logger)
+                s1_conv1 = tf_utils.norm(s1_conv1, name='s1_norm0', _type=self.norm, _ops=self._ops,
+                                         is_train=train_mode, logger=self.logger)
                 s1_conv1 = tf_utils.relu(s1_conv1, name='relu_s1_conv1', logger=self.logger)
 
                 s1_conv2 = tf_utils.conv2d(x=s1_conv1, output_dim=self.conv_dims[1], k_h=3, k_w=3, d_h=1, d_w=1,
                                            padding=self.padding, initializer='He', name='s1_conv2', logger=self.logger)
-                if self.use_batch_norm:
-                    s1_conv2 = tf_utils.norm(s1_conv2, name='s1_norm1', _type='batch', _ops=self._ops,
-                                             is_train=train_mode, logger=self.logger)
+                s1_conv2 = tf_utils.norm(s1_conv2, name='s1_norm1', _type='batch', _ops=self._ops,
+                                         is_train=train_mode, logger=self.logger)
                 s1_conv2 = tf_utils.relu(s1_conv2, name='relu_s1_conv2', logger=self.logger)
             else:
                 # Stage 1
@@ -521,57 +520,50 @@ class Generator(object):
 
                 s1_conv2 = tf_utils.conv2d(x=s1_conv1, output_dim=self.conv_dims[1], k_h=3, k_w=3, d_h=1, d_w=1,
                                            padding=self.padding, initializer='He', name='s1_conv2', logger=self.logger)
-                if self.use_batch_norm:
-                    s1_conv2 = tf_utils.norm(s1_conv2, name='s1_norm1', _type='batch', _ops=self._ops,
-                                             is_train=train_mode, logger=self.logger)
+                s1_conv2 = tf_utils.norm(s1_conv2, name='s1_norm1', _type=self.norm, _ops=self._ops,
+                                         is_train=train_mode, logger=self.logger)
                 s1_conv2 = tf_utils.relu(s1_conv2, name='relu_s1_conv2', logger=self.logger)
 
             # Stage 2
             s2_maxpool = tf_utils.max_pool(x=s1_conv2, name='s2_maxpool2d', logger=self.logger)
             s2_conv1 = tf_utils.conv2d(x=s2_maxpool, output_dim=self.conv_dims[2], k_h=3, k_w=3, d_h=1, d_w=1,
                                        padding=self.padding, initializer='He', name='s2_conv1', logger=self.logger)
-            if self.use_batch_norm:
-                s2_conv1 = tf_utils.norm(s2_conv1, name='s2_norm0', _type='batch', _ops=self._ops,
-                                         is_train=train_mode, logger=self.logger)
+            s2_conv1 = tf_utils.norm(s2_conv1, name='s2_norm0', _type=self.norm, _ops=self._ops,
+                                     is_train=train_mode, logger=self.logger)
             s2_conv1 = tf_utils.relu(s2_conv1, name='relu_s2_conv1', logger=self.logger)
 
             s2_conv2 = tf_utils.conv2d(x=s2_conv1, output_dim=self.conv_dims[3], k_h=3, k_w=3, d_h=1, d_w=1,
                                        padding=self.padding, initializer='He', name='s2_conv2', logger=self.logger)
-            if self.use_batch_norm:
-                s2_conv2 = tf_utils.norm(s2_conv2, name='s2_norm1', _type='batch', _ops=self._ops,
-                                         is_train=train_mode, logger=self.logger)
+            s2_conv2 = tf_utils.norm(s2_conv2, name='s2_norm1', _type=self.norm, _ops=self._ops,
+                                     is_train=train_mode, logger=self.logger)
             s2_conv2 = tf_utils.relu(s2_conv2, name='relu_s2_conv2', logger=self.logger)
 
             # Stage 3
             s3_maxpool = tf_utils.max_pool(x=s2_conv2, name='s3_maxpool2d', logger=self.logger)
             s3_conv1 = tf_utils.conv2d(x=s3_maxpool, output_dim=self.conv_dims[4], k_h=3, k_w=3, d_h=1, d_w=1,
                                        padding=self.padding, initializer='He', name='s3_conv1', logger=self.logger)
-            if self.use_batch_norm:
-                s3_conv1 = tf_utils.norm(s3_conv1, name='s3_norm0', _type='batch', _ops=self._ops,
-                                         is_train=train_mode, logger=self.logger)
+            s3_conv1 = tf_utils.norm(s3_conv1, name='s3_norm0', _type=self.norm, _ops=self._ops,
+                                     is_train=train_mode, logger=self.logger)
             s3_conv1 = tf_utils.relu(s3_conv1, name='relu_s3_conv1', logger=self.logger)
 
             s3_conv2 = tf_utils.conv2d(x=s3_conv1, output_dim=self.conv_dims[5], k_h=3, k_w=3, d_h=1, d_w=1,
                                        padding=self.padding, initializer='He', name='s3_conv2', logger=self.logger)
-            if self.use_batch_norm:
-                s3_conv2 = tf_utils.norm(s3_conv2, name='s3_norm1', _type='batch', _ops=self._ops,
-                                         is_train=train_mode, logger=self.logger)
+            s3_conv2 = tf_utils.norm(s3_conv2, name='s3_norm1', _type=self.norm, _ops=self._ops,
+                                     is_train=train_mode, logger=self.logger)
             s3_conv2 = tf_utils.relu(s3_conv2, name='relu_s3_conv2', logger=self.logger)
 
             # Stage 4
             s4_maxpool = tf_utils.max_pool(x=s3_conv2, name='s4_maxpool2d', logger=self.logger)
             s4_conv1 = tf_utils.conv2d(x=s4_maxpool, output_dim=self.conv_dims[6], k_h=3, k_w=3, d_h=1, d_w=1,
                                        padding=self.padding, initializer='He', name='s4_conv1', logger=self.logger)
-            if self.use_batch_norm:
-                s4_conv1 = tf_utils.norm(s4_conv1, name='s4_norm0', _type='batch', _ops=self._ops,
-                                         is_train=train_mode, logger=self.logger)
+            s4_conv1 = tf_utils.norm(s4_conv1, name='s4_norm0', _type=self.norm, _ops=self._ops,
+                                     is_train=train_mode, logger=self.logger)
             s4_conv1 = tf_utils.relu(s4_conv1, name='relu_s4_conv1', logger=self.logger)
 
             s4_conv2 = tf_utils.conv2d(x=s4_conv1, output_dim=self.conv_dims[7], k_h=3, k_w=3, d_h=1, d_w=1,
                                        padding=self.padding, initializer='He', name='s4_conv2', logger=self.logger)
-            if self.use_batch_norm:
-                s4_conv2 = tf_utils.norm(s4_conv2, name='s4_norm1', _type='batch', _ops=self._ops,
-                                         is_train=train_mode, logger=self.logger)
+            s4_conv2 = tf_utils.norm(s4_conv2, name='s4_norm1', _type=self.norm, _ops=self._ops,
+                                     is_train=train_mode, logger=self.logger)
             s4_conv2 = tf_utils.relu(s4_conv2, name='relu_s4_conv2', logger=self.logger)
             s4_conv2_drop = tf_utils.dropout(x=s4_conv2, keep_prob=keep_rate, name='s4_dropout',
                                              logger=self.logger)
@@ -580,16 +572,14 @@ class Generator(object):
             s5_maxpool = tf_utils.max_pool(x=s4_conv2_drop, name='s5_maxpool2d', logger=self.logger)
             s5_conv1 = tf_utils.conv2d(x=s5_maxpool, output_dim=self.conv_dims[8], k_h=3, k_w=3, d_h=1, d_w=1,
                                        padding=self.padding, initializer='He', name='s5_conv1', logger=self.logger)
-            if self.use_batch_norm:
-                s5_conv1 = tf_utils.norm(s5_conv1, name='s5_norm0', _type='batch', _ops=self._ops,
-                                         is_train=train_mode, logger=self.logger)
+            s5_conv1 = tf_utils.norm(s5_conv1, name='s5_norm0', _type=self.norm, _ops=self._ops,
+                                     is_train=train_mode, logger=self.logger)
             s5_conv1 = tf_utils.relu(s5_conv1, name='relu_s5_conv1', logger=self.logger)
 
             s5_conv2 = tf_utils.conv2d(x=s5_conv1, output_dim=self.conv_dims[9], k_h=3, k_w=3, d_h=1, d_w=1,
                                        padding=self.padding, initializer='He', name='s5_conv2', logger=self.logger)
-            if self.use_batch_norm:
-                s5_conv2 = tf_utils.norm(s5_conv2, name='s5_norm1', _type='batch', _ops=self._ops,
-                                         is_train=train_mode, logger=self.logger)
+            s5_conv2 = tf_utils.norm(s5_conv2, name='s5_norm1', _type=self.norm, _ops=self._ops,
+                                     is_train=train_mode, logger=self.logger)
             s5_conv2 = tf_utils.relu(s5_conv2, name='relu_s5_conv2', logger=self.logger)
             s5_conv2_drop = tf_utils.dropout(x=s5_conv2, keep_prob=keep_rate, name='s5_dropout',
                                              logger=self.logger)
@@ -597,9 +587,8 @@ class Generator(object):
             # Stage 6
             s6_deconv1 = tf_utils.deconv2d(x=s5_conv2_drop, output_dim=self.conv_dims[10], k_h=2, k_w=2,
                                            initializer='He', name='s6_deconv1', logger=self.logger)
-            if self.use_batch_norm:
-                s6_deconv1 = tf_utils.norm(s6_deconv1, name='s6_norm0', _type='batch', _ops=self._ops,
-                                         is_train=train_mode, logger=self.logger)
+            s6_deconv1 = tf_utils.norm(s6_deconv1, name='s6_norm0', _type=self.norm, _ops=self._ops,
+                                       is_train=train_mode, logger=self.logger)
             s6_deconv1 = tf_utils.relu(s6_deconv1, name='relu_s6_deconv1', logger=self.logger)
             # Cropping
             w1 = s4_conv2_drop.get_shape().as_list()[2]
@@ -612,24 +601,21 @@ class Generator(object):
 
             s6_conv2 = tf_utils.conv2d(x=s6_concat, output_dim=self.conv_dims[11], k_h=3, k_w=3, d_h=1, d_w=1,
                                        padding=self.padding, initializer='He', name='s6_conv2', logger=self.logger)
-            if self.use_batch_norm:
-                s6_conv2 = tf_utils.norm(s6_conv2, name='s6_norm1', _type='batch', _ops=self._ops,
-                                         is_train=train_mode, logger=self.logger)
+            s6_conv2 = tf_utils.norm(s6_conv2, name='s6_norm1', _type=self.norm, _ops=self._ops,
+                                     is_train=train_mode, logger=self.logger)
             s6_conv2 = tf_utils.relu(s6_conv2, name='relu_s6_conv2', logger=self.logger)
 
             s6_conv3 = tf_utils.conv2d(x=s6_conv2, output_dim=self.conv_dims[12], k_h=3, k_w=3, d_h=1, d_w=1,
                                        padding=self.padding, initializer='He', name='s6_conv3', logger=self.logger)
-            if self.use_batch_norm:
-                s6_conv3 = tf_utils.norm(s6_conv3, name='s6_norm2', _type='batch', _ops=self._ops,
-                                         is_train=train_mode, logger=self.logger)
+            s6_conv3 = tf_utils.norm(s6_conv3, name='s6_norm2', _type=self.norm, _ops=self._ops,
+                                     is_train=train_mode, logger=self.logger)
             s6_conv3 = tf_utils.relu(s6_conv3, name='relu_s6_conv3', logger=self.logger)
 
             # Stage 7
             s7_deconv1 = tf_utils.deconv2d(x=s6_conv3, output_dim=self.conv_dims[13], k_h=2, k_w=2, initializer='He',
                                            name='s7_deconv1', logger=self.logger)
-            if self.use_batch_norm:
-                s7_deconv1 = tf_utils.norm(s7_deconv1, name='s7_norm0', _type='batch', _ops=self._ops,
-                                         is_train=train_mode, logger=self.logger)
+            s7_deconv1 = tf_utils.norm(s7_deconv1, name='s7_norm0', _type=self.norm, _ops=self._ops,
+                                       is_train=train_mode, logger=self.logger)
             s7_deconv1 = tf_utils.relu(s7_deconv1, name='relu_s7_deconv1', logger=self.logger)
             # Concat
             s7_concat = tf_utils.concat(values=[s7_deconv1, s3_conv2], axis=3, name='s7_axis3_concat',
@@ -637,24 +623,21 @@ class Generator(object):
 
             s7_conv2 = tf_utils.conv2d(x=s7_concat, output_dim=self.conv_dims[14], k_h=3, k_w=3, d_h=1, d_w=1,
                                        padding=self.padding, initializer='He', name='s7_conv2', logger=self.logger)
-            if self.use_batch_norm:
-                s7_conv2 = tf_utils.norm(s7_conv2, name='s7_norm1', _type='batch', _ops=self._ops,
-                                         is_train=train_mode, logger=self.logger)
+            s7_conv2 = tf_utils.norm(s7_conv2, name='s7_norm1', _type=self.norm, _ops=self._ops,
+                                     is_train=train_mode, logger=self.logger)
             s7_conv2 = tf_utils.relu(s7_conv2, name='relu_s7_conv2', logger=self.logger)
 
             s7_conv3 = tf_utils.conv2d(x=s7_conv2, output_dim=self.conv_dims[15], k_h=3, k_w=3, d_h=1, d_w=1,
                                        padding=self.padding, initializer='He', name='s7_conv3', logger=self.logger)
-            if self.use_batch_norm:
-                s7_conv3 = tf_utils.norm(s7_conv3, name='s7_norm2', _type='batch', _ops=self._ops,
-                                         is_train=train_mode, logger=self.logger)
+            s7_conv3 = tf_utils.norm(s7_conv3, name='s7_norm2', _type=self.norm, _ops=self._ops,
+                                     is_train=train_mode, logger=self.logger)
             s7_conv3 = tf_utils.relu(s7_conv3, name='relu_s7_conv3', logger=self.logger)
 
             # Stage 8
             s8_deconv1 = tf_utils.deconv2d(x=s7_conv3, output_dim=self.conv_dims[16], k_h=2, k_w=2, initializer='He',
                                            name='s8_deconv1', logger=self.logger)
-            if self.use_batch_norm:
-                s8_deconv1 = tf_utils.norm(s8_deconv1, name='s8_norm0', _type='batch', _ops=self._ops,
-                                         is_train=train_mode, logger=self.logger)
+            s8_deconv1 = tf_utils.norm(s8_deconv1, name='s8_norm0', _type=self.norm, _ops=self._ops,
+                                       is_train=train_mode, logger=self.logger)
             s8_deconv1 = tf_utils.relu(s8_deconv1, name='relu_s8_deconv1', logger=self.logger)
             # Concat
             s8_concat = tf_utils.concat(values=[s8_deconv1,s2_conv2], axis=3, name='s8_axis3_concat',
@@ -662,24 +645,21 @@ class Generator(object):
 
             s8_conv2 = tf_utils.conv2d(x=s8_concat, output_dim=self.conv_dims[17], k_h=3, k_w=3, d_h=1, d_w=1,
                                        padding=self.padding, initializer='He', name='s8_conv2', logger=self.logger)
-            if self.use_batch_norm:
-                s8_conv2 = tf_utils.norm(s8_conv2, name='s8_norm1', _type='batch', _ops=self._ops,
-                                         is_train=train_mode, logger=self.logger)
+            s8_conv2 = tf_utils.norm(s8_conv2, name='s8_norm1', _type=self.norm, _ops=self._ops,
+                                     is_train=train_mode, logger=self.logger)
             s8_conv2 = tf_utils.relu(s8_conv2, name='relu_s8_conv2', logger=self.logger)
 
             s8_conv3 = tf_utils.conv2d(x=s8_conv2, output_dim=self.conv_dims[18], k_h=3, k_w=3, d_h=1, d_w=1,
                                        padding=self.padding, initializer='He', name='s8_conv3', logger=self.logger)
-            if self.use_batch_norm:
-                s8_conv3 = tf_utils.norm(s8_conv3, name='s8_norm2', _type='batch', _ops=self._ops,
-                                         is_train=train_mode, logger=self.logger)
+            s8_conv3 = tf_utils.norm(s8_conv3, name='s8_norm2', _type=self.norm, _ops=self._ops,
+                                     is_train=train_mode, logger=self.logger)
             s8_conv3 = tf_utils.relu(s8_conv3, name='relu_conv3', logger=self.logger)
 
             # Stage 9
             s9_deconv1 = tf_utils.deconv2d(x=s8_conv3, output_dim=self.conv_dims[19], k_h=2, k_w=2,
                                            initializer='He', name='s9_deconv1', logger=self.logger)
-            if self.use_batch_norm:
-                s9_deconv1 = tf_utils.norm(s9_deconv1, name='s9_norm0', _type='batch', _ops=self._ops,
-                                         is_train=train_mode, logger=self.logger)
+            s9_deconv1 = tf_utils.norm(s9_deconv1, name='s9_norm0', _type=self.norm, _ops=self._ops,
+                                       is_train=train_mode, logger=self.logger)
             s9_deconv1 = tf_utils.relu(s9_deconv1, name='relu_s9_deconv1', logger=self.logger)
             # Concat
             s9_concat = tf_utils.concat(values=[s9_deconv1, s1_conv2], axis=3, name='s9_axis3_concat',
@@ -687,24 +667,21 @@ class Generator(object):
 
             s9_conv2 = tf_utils.conv2d(x=s9_concat, output_dim=self.conv_dims[20], k_h=3, k_w=3, d_h=1, d_w=1,
                                        padding=self.padding, initializer='He', name='s9_conv2', logger=self.logger)
-            if self.use_batch_norm:
-                s9_conv2 = tf_utils.norm(s9_conv2, name='s9_norm1', _type='batch', _ops=self._ops,
-                                         is_train=train_mode, logger=self.logger)
+            s9_conv2 = tf_utils.norm(s9_conv2, name='s9_norm1', _type=self.norm, _ops=self._ops,
+                                     is_train=train_mode, logger=self.logger)
             s9_conv2 = tf_utils.relu(s9_conv2, name='relu_s9_conv2', logger=self.logger)
 
             s9_conv3 = tf_utils.conv2d(x=s9_conv2, output_dim=self.conv_dims[21], k_h=3, k_w=3, d_h=1, d_w=1,
                                        padding=self.padding, initializer='He', name='s9_conv3', logger=self.logger)
-            if self.use_batch_norm:
-                s9_conv3 = tf_utils.norm(s9_conv3, name='s9_norm2', _type='batch', _ops=self._ops,
-                                         is_train=train_mode, logger=self.logger)
+            s9_conv3 = tf_utils.norm(s9_conv3, name='s9_norm2', _type=self.norm, _ops=self._ops,
+                                     is_train=train_mode, logger=self.logger)
             s9_conv3 = tf_utils.relu(s9_conv3, name='relu_s9_conv3', logger=self.logger)
 
             if self.resize_factor == 1.0:
                 s10_deconv1 = tf_utils.deconv2d(x=s9_conv3, output_dim=self.conv_dims[-1], k_h=2, k_w=2,
                                                 initializer='He', name='s10_deconv1', logger=self.logger)
-                if self.use_batch_norm:
-                    s10_deconv1 = tf_utils.norm(s10_deconv1, name='s10_norm0', _type='batch', _ops=self._ops,
-                                             is_train=train_mode, logger=self.logger)
+                s10_deconv1 = tf_utils.norm(s10_deconv1, name='s10_norm0', _type=self.norm, _ops=self._ops,
+                                            is_train=train_mode, logger=self.logger)
                 s10_deconv1 = tf_utils.relu(s10_deconv1, name='relu_s10_deconv1', logger=self.logger)
                 # Concat
                 s10_concat = tf_utils.concat(values=[s10_deconv1, s0_conv2], axis=3, name='s10_axis3_concat',
@@ -712,16 +689,14 @@ class Generator(object):
 
                 s10_conv2 = tf_utils.conv2d(s10_concat, output_dim=self.conv_dims[-1], k_h=3, k_w=3, d_h=1, d_w=1,
                                             padding=self.padding, initializer='He', name='s10_conv2', logger=self.logger)
-                if self.use_batch_norm:
-                    s10_conv2 = tf_utils.norm(s10_conv2, name='s10_norm1', _type='batch', _ops=self._ops,
-                                             is_train=train_mode, logger=self.logger)
+                s10_conv2 = tf_utils.norm(s10_conv2, name='s10_norm1', _type=self.norm, _ops=self._ops,
+                                          is_train=train_mode, logger=self.logger)
                 s10_conv2 = tf_utils.relu(s10_conv2, name='relu_s10_conv2', logger=self.logger)
 
                 s10_conv3 = tf_utils.conv2d(x=s10_conv2, output_dim=self.conv_dims[-1], k_h=3, k_w=3, d_h=1, d_w=1,
                                             padding=self.padding, initializer='He', name='s10_conv3', logger=self.logger)
-                if self.use_batch_norm:
-                    s10_conv3 = tf_utils.norm(s10_conv3, name='s10_norm2', _type='batch', _ops=self._ops,
-                                             is_train=train_mode, logger=self.logger)
+                s10_conv3 = tf_utils.norm(s10_conv3, name='s10_norm2', _type=self.norm, _ops=self._ops,
+                                          is_train=train_mode, logger=self.logger)
                 s10_conv3 = tf_utils.relu(s10_conv3, name='relu_s10_conv3', logger=self.logger)
 
                 output = tf_utils.conv2d(s10_conv3, output_dim=self.num_classes, k_h=1, k_w=1, d_h=1, d_w=1,
@@ -730,11 +705,14 @@ class Generator(object):
                 output = tf_utils.conv2d(s9_conv3, output_dim=self.num_classes, k_h=1, k_w=1, d_h=1, d_w=1,
                                          padding=self.padding, initializer='He', name='output', logger=self.logger)
 
+            gen_output = tf_utils.conv2d(output, output_dim=1, k_h=1, k_w=1, d_h=1, d_w=1, padding=self.padding,
+                                         initializer='He', name='gen_outupt', logger=self.logger)
+
             # set reuse=True for next call
             self.reuse = True
             self.variables = tf.compat.v1.get_collection(tf.compat.v1.GraphKeys.TRAINABLE_VARIABLES, scope=self.name)
 
-            return output
+            return output, tf_utils.sigmoid(gen_output)
 
 
 class Discriminator(object):

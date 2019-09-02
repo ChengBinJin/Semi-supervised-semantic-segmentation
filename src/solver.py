@@ -33,10 +33,9 @@ class Solver(object):
             self.model.train_mode_tfph: True
         }
 
-        train_op = self.model.trainOp
-        total_loss_op = self.model.totalLoss
-        data_loss_op = self.model.dataLoss
-        reg_term_op = self.model.regTerm
+        train_op = self.model.train_op
+        total_loss_op = self.model.total_loss
+        data_loss_op = self.model.data_loss
         dice_loss_op = self.model.dice_loss
         summary_op = self.model.summary_op
 
@@ -238,31 +237,31 @@ class Solver(object):
                         is_vertical=True)
 
     def set_best_mIoU(self, best_mIoU):
-        self.sess.run(self.model.assign_best_mIoU, feed_dict={self.model.best_mIoU_ph: best_mIoU})
+        self.sess.run(self.model.assign_best_mIoU, feed_dict={self.model.best_mIoU_tfph: best_mIoU})
 
     def get_best_mIoU(self):
         return self.sess.run(self.model.best_mIoU)
 
     def set_best_acc(self, best_acc):
-        self.sess.run(self.model.assign_best_acc, feed_dict={self.model.best_acc_ph: best_acc})
+        self.sess.run(self.model.assign_best_acc, feed_dict={self.model.best_acc_tfph: best_acc})
 
     def get_best_acc(self):
         return self.sess.run(self.model.best_acc)
 
     def set_best_precision(self, best_precision):
-        self.sess.run(self.model.assign_best_precision, feed_dict={self.model.best_precision_ph: best_precision})
+        self.sess.run(self.model.assign_best_precision, feed_dict={self.model.best_precision_tfph: best_precision})
 
     def get_best_precision(self):
         return self.sess.run(self.model.best_precision)
 
     def set_best_recall(self, best_recall):
-        self.sess.run(self.model.assign_best_recall, feed_dict={self.model.best_recall_ph: best_recall})
+        self.sess.run(self.model.assign_best_recall, feed_dict={self.model.best_recall_tfph: best_recall})
 
     def get_best_recall(self):
         return self.sess.run(self.model.best_recall)
 
     def set_best_f1_score(self, best_f1_score):
-        self.sess.run(self.model.assign_best_f1_score, feed_dict={self.model.best_f1_score_ph: best_f1_score})
+        self.sess.run(self.model.assign_best_f1_score, feed_dict={self.model.best_f1_score_tfph: best_f1_score})
 
     def get_best_f1_score(self):
         return self.sess.run(self.model.best_f1_score)

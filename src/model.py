@@ -14,7 +14,7 @@ import tensorflow_utils as tf_utils
 from reader import Reader
 
 
-class UNet(object):
+class Model(object):
     def __init__(self, decode_img_shape=(320, 400, 1), output_shape=(320, 200, 1), num_classes=4,
                  data_path=(None, None), batch_size=1, lr=1e-3, weight_decay=1e-4, total_iters=2e5, is_train=True,
                  log_dir=None, method=None, multi_test=True, resize_factor=0.5, use_dice_loss=False,
@@ -33,8 +33,8 @@ class UNet(object):
         self.multi_test = False if self.is_train else multi_test
         self.degree = 10
         self.num_try = len(range(-self.degree, self.degree+1, 2))  # multi_tes: from -10 degree to 11 degrees
-        self.conv_dims = [32, 32, 32, 32, 32, 32, 32, 32, 64, 64,
-                         32, 32, 32, 32, 32, 32, 32, 32, 32, 16, 16, 16]
+        self.gen_c = [32, 32, 32, 32, 32, 32, 32, 32, 64, 64, 32, 32, 32, 32, 32, 32, 32, 32, 32, 16, 16, 16]
+        self.dis_c = [32, 64, 128, 256, 512, 1]
 
         self.data_path = data_path
         self.batch_size = batch_size
@@ -48,7 +48,8 @@ class UNet(object):
 
         self.mIoU_metric, self.mIoU_metric_update = None, None
         self.tb_lr = None
-        self._ops = list()
+        self.gen_ops = list()
+        self.dis_ops = list()
 
         self.logger = logging.getLogger(__name__)  # logger
         self.logger.setLevel(logging.INFO)
@@ -77,14 +78,34 @@ class UNet(object):
         # Random batch for training
         self.img_train, self.seg_img_train = train_reader.shuffle_batch()
 
+        # Initialize generator and discriminator
+        self.gen_obj = Generator(name='Gen', conv_dims=self.gen_c, padding='SAME', logger=self.logger,
+                                 resize_factor=self.resize_factor, use_batch_norm=self.use_batch_norm,
+                                 num_classes=self.num_classes, _ops=self.gen_ops)
+        self.dis_obj = Discriminator(name='Dis', dis_c=self.dis_c, norm='instance', logger=self.logger,
+                                     _ops=self.dis_ops)
+
         # Network forward for training
-        self.pred_train = self.forward_network(input_img=self.normalize(self.img_train), reuse=False)
+        self.pred_train = self.gen_obj(input_img=self.normalize(self.img_train),
+                                         train_mode=self.train_mode_tfph,
+                                         keep_rate=self.rate_tfph)
         self.pred_cls_train = tf.math.argmax(self.pred_train, axis=-1)
 
+        # Concatenation
+        self.real_pair = tf.concat([self.normalize(self.img_train), self.transform_seg(self.seg_img_train)], axis=3)
+        self.fake_pair = tf.concat([self.normalize(self.img_train), self.transform_seg(self.pred_cls_train)], axis=3)
+        # self.fake_pair_2 = tf.concat([tf.random.shuffle(self.normalize(self.img_train)),
+        #                               tf.random.shuffle(self.transform_seg(self.seg_img_train))], axis=3)
+        # self.fake_pair = tf.concat([self.fake_pair_1, self.fake_pair_2], axis=0)
+
+        # Define generator loss
         # Data loss
         self.data_loss = tf.math.reduce_mean(tf.nn.softmax_cross_entropy_with_logits_v2(
             logits=self.pred_train,
             labels=self.convert_one_hot(self.seg_img_train)))
+
+        # Adversarial loss
+        self.gen_adv_loss =self.generator_loss(self.dis_obj, self.fake_pair)
 
         # Additional loss function
         # Dice coefficient loss term
@@ -94,12 +115,36 @@ class UNet(object):
                                                         hyper_parameter=self.lambda_one)
 
         # Total loss = Data loss + Regularization term + Dice coefficient loss
-        self.total_loss = self.data_loss + self.dice_loss
+        self.gen_loss = self.data_loss + self.gen_adv_loss, self.dice_loss
+
+        # Define discriminator loss
+        self.dis_loss = self.discriminator_loss(self.dis_obj, self.real_pair, self.fake_pair)
 
         # Optimizer
-        train_op = self.init_optimizer(loss=self.total_loss, name='Adam')
-        train_ops = [train_op] + self._ops
-        self.trainOp = tf.group(*train_ops)
+        train_op_ = self.init_optimizer(loss=self.gen_loss, name='Adam')
+        train_ops = [train_op_] + self.gen_ops
+        self.train_op = tf.group(*train_ops)
+
+    @staticmethod
+    def generator_loss(dis_obj, fake_img):
+        d_logit_fake = dis_obj(fake_img)
+        loss = tf.math.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(logits=d_logit_fake ,
+                                                                           labels=tf.ones_like(d_logit_fake)))
+        return loss
+
+    @staticmethod
+    def discriminator_loss(dis_obj, real_img, fake_img):
+        d_logit_real = dis_obj(real_img)
+        d_logit_fake = dis_obj(fake_img)
+
+        error_real = tf.math.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(
+            logits=d_logit_real, labels=tf.ones_like(d_logit_real)))
+        error_fake = tf.math.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(
+            logits=d_logit_fake, labels=tf.zeros_like(d_logit_fake)))
+
+        loss = 0.5 * (error_real + error_fake)
+        return loss
+
 
     def generalized_dice_loss(self, labels, logits, hyper_parameter=1.0):
         # This implementation refers to srcolinas's dice_loss.py
@@ -156,11 +201,15 @@ class UNet(object):
             img_val_2 = tf.slice(img_val, begin=[self.num_try, 0, 0, 0], size=[self.num_try, h, w, c])
 
             # Network forward for validation data
-            pred_val_1 = self.forward_network(input_img=self.normalize(img_val_1), reuse=True)
-            pred_val_2 = self.forward_network(input_img=self.normalize(img_val_2), reuse=True)
+            pred_val_1 = self.gen_obj(input_img=self.normalize(img_val_1), train_mode=self.train_mode_tfph,
+                                      keep_rate=self.rate_tfph)
+            pred_val_2 = self.gen_obj(input_img=self.normalize(img_val_2), train_mode=self.train_mode_tfph,
+                                      keep_rate=self.rate_tfph)
             pred_val = tf.concat(values=[pred_val_1, pred_val_2], axis=0)
         else:
-            pred_val = self.forward_network(input_img=self.normalize(img_val), reuse=True)
+            pred_val = self.gen_obj(input_img=self.normalize(img_val),
+                                    train_mode=self.train_mode_tfph,
+                                    keep_rate=self.rate_tfph)
 
         # Since multi_test, we need inversely rotate back to the original segImg
         if self.multi_test:
@@ -293,11 +342,14 @@ class UNet(object):
             img_test_2 = tf.slice(img_test, begin=[self.num_try, 0, 0, 0], size=[self.num_try, h, w, c])
 
             # Network forward for test data
-            pred_test_1 = self.forward_network(input_img=self.normalize(img_test_1), reuse=True)
-            pred_test_2 = self.forward_network(input_img=self.normalize(img_test_2), reuse=True)
+            pred_test_1 = self.gen_obj(input_img=self.normalize(img_test_1), train_mode=self.train_mode_tfph,
+                                       keep_rate=self.rate_tfph)
+            pred_test_2 = self.gen_obj(input_img=self.normalize(img_test_2), train_mode=self.train_mode_tfph,
+                                       keep_rate=self.rate_tfph)
             pred_test = tf.concat(values=[pred_test_1, pred_test_2], axis=0)
         else:
-            pred_test = self.forward_network(input_img=self.normalize(img_test), reuse=True)
+            pred_test = self.gen_obj(input_img=self.normalize(img_test), train_mode=self.train_mode_tfph,
+                                     keep_rate=self.rate_tfph)
 
         # Since multi_test, we need inversely rotate back to the original segImg
         if self.multi_test:
@@ -390,6 +442,12 @@ class UNet(object):
     def normalize(data):
         return data / 127.5 - 1.0
 
+    def transform_seg(self, img):
+        # label 0~3
+        img = img * 255. / (self.num_classes - 1)
+        img = img / 127.5 - 1.
+        return img
+
     def convert_one_hot(self, data):
         shape = data.get_shape().as_list()
         data = tf.dtypes.cast(data, dtype=tf.uint8)
@@ -398,119 +456,132 @@ class UNet(object):
 
         return data
 
-    def forward_network(self, input_img, padding='SAME', reuse=False):
-        with tf.compat.v1.variable_scope(self.name, reuse=reuse):
+class Generator(object):
+    def __init__(self, name=None, conv_dims=None, padding='SAME', logger=None, resize_factor=0.5, use_batch_norm=True,
+                 num_classes=4, _ops=None):
+        self.name = name
+        self.conv_dims = conv_dims
+        self.padding = padding
+        self.logger = logger
+        self.resize_factor = resize_factor
+        self.use_batch_norm = use_batch_norm
+        self.num_classes = num_classes
+        self._ops = _ops
+        self.reuse = False
+
+    def __call__(self, input_img, train_mode=True, keep_rate=0.5):
+        with tf.compat.v1.variable_scope(self.name, reuse=self.reuse):
             # This part is for compatible between input size [640, 400] and [320, 200]
             if self.resize_factor == 1.0:
                 # Stage 0
                 tf_utils.print_activations(input_img, logger=self.logger)
                 s0_conv1 = tf_utils.conv2d(x=input_img, output_dim=self.conv_dims[0], k_h=3, k_w=3, d_h=1, d_w=1,
-                                           padding=padding, initializer='He', name='s0_conv1', logger=self.logger)
+                                           padding=self.padding, initializer='He', name='s0_conv1', logger=self.logger)
                 s0_conv1 = tf_utils.relu(s0_conv1, name='relu_s0_conv1', logger=self.logger)
 
                 s0_conv2 = tf_utils.conv2d(x=s0_conv1, output_dim=self.conv_dims[0], k_h=3, k_w=3, d_h=1, d_w=1,
-                                           padding=padding, initializer='He', name='s0_conv2', logger=self.logger)
+                                           padding=self.padding, initializer='He', name='s0_conv2', logger=self.logger)
                 if self.use_batch_norm:
                     s0_conv2 = tf_utils.norm(s0_conv2, name='s0_norm1', _type='batch', _ops=self._ops,
-                                             is_train=self.train_mode_tfph, logger=self.logger)
+                                             is_train=train_mode, logger=self.logger)
                 s0_conv2 = tf_utils.relu(s0_conv2, name='relu_s0_conv2', logger=self.logger)
 
                 # Stage 1
                 s1_maxpool = tf_utils.max_pool(x=s0_conv2, name='s1_maxpool2d', logger=self.logger)
 
                 s1_conv1 = tf_utils.conv2d(x=s1_maxpool, output_dim=self.conv_dims[0], k_h=3, k_w=3, d_h=1, d_w=1,
-                                           padding=padding, initializer='He', name='s1_conv1', logger=self.logger)
+                                           padding=self.padding, initializer='He', name='s1_conv1', logger=self.logger)
                 if self.use_batch_norm:
                     s1_conv1 = tf_utils.norm(s1_conv1, name='s1_norm0', _type='batch', _ops=self._ops,
-                                             is_train=self.train_mode_tfph, logger=self.logger)
+                                             is_train=train_mode, logger=self.logger)
                 s1_conv1 = tf_utils.relu(s1_conv1, name='relu_s1_conv1', logger=self.logger)
 
                 s1_conv2 = tf_utils.conv2d(x=s1_conv1, output_dim=self.conv_dims[1], k_h=3, k_w=3, d_h=1, d_w=1,
-                                           padding=padding, initializer='He', name='s1_conv2', logger=self.logger)
+                                           padding=self.padding, initializer='He', name='s1_conv2', logger=self.logger)
                 if self.use_batch_norm:
                     s1_conv2 = tf_utils.norm(s1_conv2, name='s1_norm1', _type='batch', _ops=self._ops,
-                                             is_train=self.train_mode_tfph, logger=self.logger)
+                                             is_train=train_mode, logger=self.logger)
                 s1_conv2 = tf_utils.relu(s1_conv2, name='relu_s1_conv2', logger=self.logger)
             else:
                 # Stage 1
                 tf_utils.print_activations(input_img, logger=self.logger)
                 s1_conv1 = tf_utils.conv2d(x=input_img, output_dim=self.conv_dims[0], k_h=3, k_w=3, d_h=1, d_w=1,
-                                           padding=padding, initializer='He', name='s1_conv1', logger=self.logger)
+                                           padding=self.padding, initializer='He', name='s1_conv1', logger=self.logger)
                 s1_conv1 = tf_utils.relu(s1_conv1, name='relu_s1_conv1', logger=self.logger)
 
                 s1_conv2 = tf_utils.conv2d(x=s1_conv1, output_dim=self.conv_dims[1], k_h=3, k_w=3, d_h=1, d_w=1,
-                                           padding=padding, initializer='He', name='s1_conv2', logger=self.logger)
+                                           padding=self.padding, initializer='He', name='s1_conv2', logger=self.logger)
                 if self.use_batch_norm:
                     s1_conv2 = tf_utils.norm(s1_conv2, name='s1_norm1', _type='batch', _ops=self._ops,
-                                             is_train=self.train_mode_tfph, logger=self.logger)
+                                             is_train=train_mode, logger=self.logger)
                 s1_conv2 = tf_utils.relu(s1_conv2, name='relu_s1_conv2', logger=self.logger)
 
             # Stage 2
             s2_maxpool = tf_utils.max_pool(x=s1_conv2, name='s2_maxpool2d', logger=self.logger)
             s2_conv1 = tf_utils.conv2d(x=s2_maxpool, output_dim=self.conv_dims[2], k_h=3, k_w=3, d_h=1, d_w=1,
-                                       padding=padding, initializer='He', name='s2_conv1', logger=self.logger)
+                                       padding=self.padding, initializer='He', name='s2_conv1', logger=self.logger)
             if self.use_batch_norm:
                 s2_conv1 = tf_utils.norm(s2_conv1, name='s2_norm0', _type='batch', _ops=self._ops,
-                                         is_train=self.train_mode_tfph, logger=self.logger)
+                                         is_train=train_mode, logger=self.logger)
             s2_conv1 = tf_utils.relu(s2_conv1, name='relu_s2_conv1', logger=self.logger)
 
             s2_conv2 = tf_utils.conv2d(x=s2_conv1, output_dim=self.conv_dims[3], k_h=3, k_w=3, d_h=1, d_w=1,
-                                       padding=padding, initializer='He', name='s2_conv2', logger=self.logger)
+                                       padding=self.padding, initializer='He', name='s2_conv2', logger=self.logger)
             if self.use_batch_norm:
                 s2_conv2 = tf_utils.norm(s2_conv2, name='s2_norm1', _type='batch', _ops=self._ops,
-                                         is_train=self.train_mode_tfph, logger=self.logger)
+                                         is_train=train_mode, logger=self.logger)
             s2_conv2 = tf_utils.relu(s2_conv2, name='relu_s2_conv2', logger=self.logger)
 
             # Stage 3
             s3_maxpool = tf_utils.max_pool(x=s2_conv2, name='s3_maxpool2d', logger=self.logger)
             s3_conv1 = tf_utils.conv2d(x=s3_maxpool, output_dim=self.conv_dims[4], k_h=3, k_w=3, d_h=1, d_w=1,
-                                       padding=padding, initializer='He', name='s3_conv1', logger=self.logger)
+                                       padding=self.padding, initializer='He', name='s3_conv1', logger=self.logger)
             if self.use_batch_norm:
                 s3_conv1 = tf_utils.norm(s3_conv1, name='s3_norm0', _type='batch', _ops=self._ops,
-                                         is_train=self.train_mode_tfph, logger=self.logger)
+                                         is_train=train_mode, logger=self.logger)
             s3_conv1 = tf_utils.relu(s3_conv1, name='relu_s3_conv1', logger=self.logger)
 
             s3_conv2 = tf_utils.conv2d(x=s3_conv1, output_dim=self.conv_dims[5], k_h=3, k_w=3, d_h=1, d_w=1,
-                                       padding=padding, initializer='He', name='s3_conv2', logger=self.logger)
+                                       padding=self.padding, initializer='He', name='s3_conv2', logger=self.logger)
             if self.use_batch_norm:
                 s3_conv2 = tf_utils.norm(s3_conv2, name='s3_norm1', _type='batch', _ops=self._ops,
-                                         is_train=self.train_mode_tfph, logger=self.logger)
+                                         is_train=train_mode, logger=self.logger)
             s3_conv2 = tf_utils.relu(s3_conv2, name='relu_s3_conv2', logger=self.logger)
 
             # Stage 4
             s4_maxpool = tf_utils.max_pool(x=s3_conv2, name='s4_maxpool2d', logger=self.logger)
             s4_conv1 = tf_utils.conv2d(x=s4_maxpool, output_dim=self.conv_dims[6], k_h=3, k_w=3, d_h=1, d_w=1,
-                                       padding=padding, initializer='He', name='s4_conv1', logger=self.logger)
+                                       padding=self.padding, initializer='He', name='s4_conv1', logger=self.logger)
             if self.use_batch_norm:
                 s4_conv1 = tf_utils.norm(s4_conv1, name='s4_norm0', _type='batch', _ops=self._ops,
-                                         is_train=self.train_mode_tfph, logger=self.logger)
+                                         is_train=train_mode, logger=self.logger)
             s4_conv1 = tf_utils.relu(s4_conv1, name='relu_s4_conv1', logger=self.logger)
 
             s4_conv2 = tf_utils.conv2d(x=s4_conv1, output_dim=self.conv_dims[7], k_h=3, k_w=3, d_h=1, d_w=1,
-                                       padding=padding, initializer='He', name='s4_conv2', logger=self.logger)
+                                       padding=self.padding, initializer='He', name='s4_conv2', logger=self.logger)
             if self.use_batch_norm:
                 s4_conv2 = tf_utils.norm(s4_conv2, name='s4_norm1', _type='batch', _ops=self._ops,
-                                         is_train=self.train_mode_tfph, logger=self.logger)
+                                         is_train=train_mode, logger=self.logger)
             s4_conv2 = tf_utils.relu(s4_conv2, name='relu_s4_conv2', logger=self.logger)
-            s4_conv2_drop = tf_utils.dropout(x=s4_conv2, keep_prob=self.rate_tfph, name='s4_dropout',
+            s4_conv2_drop = tf_utils.dropout(x=s4_conv2, keep_prob=keep_rate, name='s4_dropout',
                                              logger=self.logger)
 
             # Stage 5
             s5_maxpool = tf_utils.max_pool(x=s4_conv2_drop, name='s5_maxpool2d', logger=self.logger)
             s5_conv1 = tf_utils.conv2d(x=s5_maxpool, output_dim=self.conv_dims[8], k_h=3, k_w=3, d_h=1, d_w=1,
-                                       padding=padding, initializer='He', name='s5_conv1', logger=self.logger)
+                                       padding=self.padding, initializer='He', name='s5_conv1', logger=self.logger)
             if self.use_batch_norm:
                 s5_conv1 = tf_utils.norm(s5_conv1, name='s5_norm0', _type='batch', _ops=self._ops,
-                                         is_train=self.train_mode_tfph, logger=self.logger)
+                                         is_train=train_mode, logger=self.logger)
             s5_conv1 = tf_utils.relu(s5_conv1, name='relu_s5_conv1', logger=self.logger)
 
             s5_conv2 = tf_utils.conv2d(x=s5_conv1, output_dim=self.conv_dims[9], k_h=3, k_w=3, d_h=1, d_w=1,
-                                       padding=padding, initializer='He', name='s5_conv2', logger=self.logger)
+                                       padding=self.padding, initializer='He', name='s5_conv2', logger=self.logger)
             if self.use_batch_norm:
                 s5_conv2 = tf_utils.norm(s5_conv2, name='s5_norm1', _type='batch', _ops=self._ops,
-                                         is_train=self.train_mode_tfph, logger=self.logger)
+                                         is_train=train_mode, logger=self.logger)
             s5_conv2 = tf_utils.relu(s5_conv2, name='relu_s5_conv2', logger=self.logger)
-            s5_conv2_drop = tf_utils.dropout(x=s5_conv2, keep_prob=self.rate_tfph, name='s5_dropout',
+            s5_conv2_drop = tf_utils.dropout(x=s5_conv2, keep_prob=keep_rate, name='s5_dropout',
                                              logger=self.logger)
 
             # Stage 6
@@ -518,7 +589,7 @@ class UNet(object):
                                            initializer='He', name='s6_deconv1', logger=self.logger)
             if self.use_batch_norm:
                 s6_deconv1 = tf_utils.norm(s6_deconv1, name='s6_norm0', _type='batch', _ops=self._ops,
-                                         is_train=self.train_mode_tfph, logger=self.logger)
+                                         is_train=train_mode, logger=self.logger)
             s6_deconv1 = tf_utils.relu(s6_deconv1, name='relu_s6_deconv1', logger=self.logger)
             # Cropping
             w1 = s4_conv2_drop.get_shape().as_list()[2]
@@ -530,17 +601,17 @@ class UNet(object):
                                         logger=self.logger)
 
             s6_conv2 = tf_utils.conv2d(x=s6_concat, output_dim=self.conv_dims[11], k_h=3, k_w=3, d_h=1, d_w=1,
-                                       padding=padding, initializer='He', name='s6_conv2', logger=self.logger)
+                                       padding=self.padding, initializer='He', name='s6_conv2', logger=self.logger)
             if self.use_batch_norm:
                 s6_conv2 = tf_utils.norm(s6_conv2, name='s6_norm1', _type='batch', _ops=self._ops,
-                                         is_train=self.train_mode_tfph, logger=self.logger)
+                                         is_train=train_mode, logger=self.logger)
             s6_conv2 = tf_utils.relu(s6_conv2, name='relu_s6_conv2', logger=self.logger)
 
             s6_conv3 = tf_utils.conv2d(x=s6_conv2, output_dim=self.conv_dims[12], k_h=3, k_w=3, d_h=1, d_w=1,
-                                       padding=padding, initializer='He', name='s6_conv3', logger=self.logger)
+                                       padding=self.padding, initializer='He', name='s6_conv3', logger=self.logger)
             if self.use_batch_norm:
                 s6_conv3 = tf_utils.norm(s6_conv3, name='s6_norm2', _type='batch', _ops=self._ops,
-                                         is_train=self.train_mode_tfph, logger=self.logger)
+                                         is_train=train_mode, logger=self.logger)
             s6_conv3 = tf_utils.relu(s6_conv3, name='relu_s6_conv3', logger=self.logger)
 
             # Stage 7
@@ -548,24 +619,24 @@ class UNet(object):
                                            name='s7_deconv1', logger=self.logger)
             if self.use_batch_norm:
                 s7_deconv1 = tf_utils.norm(s7_deconv1, name='s7_norm0', _type='batch', _ops=self._ops,
-                                         is_train=self.train_mode_tfph, logger=self.logger)
+                                         is_train=train_mode, logger=self.logger)
             s7_deconv1 = tf_utils.relu(s7_deconv1, name='relu_s7_deconv1', logger=self.logger)
             # Concat
             s7_concat = tf_utils.concat(values=[s7_deconv1, s3_conv2], axis=3, name='s7_axis3_concat',
                                         logger=self.logger)
 
             s7_conv2 = tf_utils.conv2d(x=s7_concat, output_dim=self.conv_dims[14], k_h=3, k_w=3, d_h=1, d_w=1,
-                                       padding=padding, initializer='He', name='s7_conv2', logger=self.logger)
+                                       padding=self.padding, initializer='He', name='s7_conv2', logger=self.logger)
             if self.use_batch_norm:
                 s7_conv2 = tf_utils.norm(s7_conv2, name='s7_norm1', _type='batch', _ops=self._ops,
-                                         is_train=self.train_mode_tfph, logger=self.logger)
+                                         is_train=train_mode, logger=self.logger)
             s7_conv2 = tf_utils.relu(s7_conv2, name='relu_s7_conv2', logger=self.logger)
 
             s7_conv3 = tf_utils.conv2d(x=s7_conv2, output_dim=self.conv_dims[15], k_h=3, k_w=3, d_h=1, d_w=1,
-                                       padding=padding, initializer='He', name='s7_conv3', logger=self.logger)
+                                       padding=self.padding, initializer='He', name='s7_conv3', logger=self.logger)
             if self.use_batch_norm:
                 s7_conv3 = tf_utils.norm(s7_conv3, name='s7_norm2', _type='batch', _ops=self._ops,
-                                         is_train=self.train_mode_tfph, logger=self.logger)
+                                         is_train=train_mode, logger=self.logger)
             s7_conv3 = tf_utils.relu(s7_conv3, name='relu_s7_conv3', logger=self.logger)
 
             # Stage 8
@@ -573,24 +644,24 @@ class UNet(object):
                                            name='s8_deconv1', logger=self.logger)
             if self.use_batch_norm:
                 s8_deconv1 = tf_utils.norm(s8_deconv1, name='s8_norm0', _type='batch', _ops=self._ops,
-                                         is_train=self.train_mode_tfph, logger=self.logger)
+                                         is_train=train_mode, logger=self.logger)
             s8_deconv1 = tf_utils.relu(s8_deconv1, name='relu_s8_deconv1', logger=self.logger)
             # Concat
             s8_concat = tf_utils.concat(values=[s8_deconv1,s2_conv2], axis=3, name='s8_axis3_concat',
                                         logger=self.logger)
 
             s8_conv2 = tf_utils.conv2d(x=s8_concat, output_dim=self.conv_dims[17], k_h=3, k_w=3, d_h=1, d_w=1,
-                                       padding=padding, initializer='He', name='s8_conv2', logger=self.logger)
+                                       padding=self.padding, initializer='He', name='s8_conv2', logger=self.logger)
             if self.use_batch_norm:
                 s8_conv2 = tf_utils.norm(s8_conv2, name='s8_norm1', _type='batch', _ops=self._ops,
-                                         is_train=self.train_mode_tfph, logger=self.logger)
+                                         is_train=train_mode, logger=self.logger)
             s8_conv2 = tf_utils.relu(s8_conv2, name='relu_s8_conv2', logger=self.logger)
 
             s8_conv3 = tf_utils.conv2d(x=s8_conv2, output_dim=self.conv_dims[18], k_h=3, k_w=3, d_h=1, d_w=1,
-                                       padding=padding, initializer='He', name='s8_conv3', logger=self.logger)
+                                       padding=self.padding, initializer='He', name='s8_conv3', logger=self.logger)
             if self.use_batch_norm:
                 s8_conv3 = tf_utils.norm(s8_conv3, name='s8_norm2', _type='batch', _ops=self._ops,
-                                         is_train=self.train_mode_tfph, logger=self.logger)
+                                         is_train=train_mode, logger=self.logger)
             s8_conv3 = tf_utils.relu(s8_conv3, name='relu_conv3', logger=self.logger)
 
             # Stage 9
@@ -598,24 +669,24 @@ class UNet(object):
                                            initializer='He', name='s9_deconv1', logger=self.logger)
             if self.use_batch_norm:
                 s9_deconv1 = tf_utils.norm(s9_deconv1, name='s9_norm0', _type='batch', _ops=self._ops,
-                                         is_train=self.train_mode_tfph, logger=self.logger)
+                                         is_train=train_mode, logger=self.logger)
             s9_deconv1 = tf_utils.relu(s9_deconv1, name='relu_s9_deconv1', logger=self.logger)
             # Concat
             s9_concat = tf_utils.concat(values=[s9_deconv1, s1_conv2], axis=3, name='s9_axis3_concat',
                                         logger=self.logger)
 
             s9_conv2 = tf_utils.conv2d(x=s9_concat, output_dim=self.conv_dims[20], k_h=3, k_w=3, d_h=1, d_w=1,
-                                       padding=padding, initializer='He', name='s9_conv2', logger=self.logger)
+                                       padding=self.padding, initializer='He', name='s9_conv2', logger=self.logger)
             if self.use_batch_norm:
                 s9_conv2 = tf_utils.norm(s9_conv2, name='s9_norm1', _type='batch', _ops=self._ops,
-                                         is_train=self.train_mode_tfph, logger=self.logger)
+                                         is_train=train_mode, logger=self.logger)
             s9_conv2 = tf_utils.relu(s9_conv2, name='relu_s9_conv2', logger=self.logger)
 
             s9_conv3 = tf_utils.conv2d(x=s9_conv2, output_dim=self.conv_dims[21], k_h=3, k_w=3, d_h=1, d_w=1,
-                                       padding=padding, initializer='He', name='s9_conv3', logger=self.logger)
+                                       padding=self.padding, initializer='He', name='s9_conv3', logger=self.logger)
             if self.use_batch_norm:
                 s9_conv3 = tf_utils.norm(s9_conv3, name='s9_norm2', _type='batch', _ops=self._ops,
-                                         is_train=self.train_mode_tfph, logger=self.logger)
+                                         is_train=train_mode, logger=self.logger)
             s9_conv3 = tf_utils.relu(s9_conv3, name='relu_s9_conv3', logger=self.logger)
 
             if self.resize_factor == 1.0:
@@ -623,30 +694,87 @@ class UNet(object):
                                                 initializer='He', name='s10_deconv1', logger=self.logger)
                 if self.use_batch_norm:
                     s10_deconv1 = tf_utils.norm(s10_deconv1, name='s10_norm0', _type='batch', _ops=self._ops,
-                                             is_train=self.train_mode_tfph, logger=self.logger)
+                                             is_train=train_mode, logger=self.logger)
                 s10_deconv1 = tf_utils.relu(s10_deconv1, name='relu_s10_deconv1', logger=self.logger)
                 # Concat
                 s10_concat = tf_utils.concat(values=[s10_deconv1, s0_conv2], axis=3, name='s10_axis3_concat',
                                              logger=self.logger)
 
                 s10_conv2 = tf_utils.conv2d(s10_concat, output_dim=self.conv_dims[-1], k_h=3, k_w=3, d_h=1, d_w=1,
-                                            padding=padding, initializer='He', name='s10_conv2', logger=self.logger)
+                                            padding=self.padding, initializer='He', name='s10_conv2', logger=self.logger)
                 if self.use_batch_norm:
                     s10_conv2 = tf_utils.norm(s10_conv2, name='s10_norm1', _type='batch', _ops=self._ops,
-                                             is_train=self.train_mode_tfph, logger=self.logger)
+                                             is_train=train_mode, logger=self.logger)
                 s10_conv2 = tf_utils.relu(s10_conv2, name='relu_s10_conv2', logger=self.logger)
 
                 s10_conv3 = tf_utils.conv2d(x=s10_conv2, output_dim=self.conv_dims[-1], k_h=3, k_w=3, d_h=1, d_w=1,
-                                            padding=padding, initializer='He', name='s10_conv3', logger=self.logger)
+                                            padding=self.padding, initializer='He', name='s10_conv3', logger=self.logger)
                 if self.use_batch_norm:
                     s10_conv3 = tf_utils.norm(s10_conv3, name='s10_norm2', _type='batch', _ops=self._ops,
-                                             is_train=self.train_mode_tfph, logger=self.logger)
+                                             is_train=train_mode, logger=self.logger)
                 s10_conv3 = tf_utils.relu(s10_conv3, name='relu_s10_conv3', logger=self.logger)
 
                 output = tf_utils.conv2d(s10_conv3, output_dim=self.num_classes, k_h=1, k_w=1, d_h=1, d_w=1,
-                                         padding=padding, initializer='He', name='output', logger=self.logger)
+                                         padding=self.padding, initializer='He', name='output', logger=self.logger)
             else:
                 output = tf_utils.conv2d(s9_conv3, output_dim=self.num_classes, k_h=1, k_w=1, d_h=1, d_w=1,
-                                         padding=padding, initializer='He', name='output', logger=self.logger)
+                                         padding=self.padding, initializer='He', name='output', logger=self.logger)
 
-            return output
+        # set reuse=True for next call
+        self.reuse = True
+        self.variables = tf.compat.v1.get_collection(tf.compat.v1.GraphKeys.TRAINABLE_VARIABLES, scope=self.name)
+
+        return output
+
+
+class Discriminator(object):
+    def __init__(self, name=None, dis_c=None, norm='instance', logger=None, _ops=None):
+        self.name = name
+        self.conv_dims = dis_c
+        self.norm = norm
+        self.logger = logger
+        self._ops = _ops
+        self.reuse = False
+
+    def __call__(self, x):
+        with tf.compat.v1.variable_scope(self.name, reuse=self.reuse):
+            tf_utils.print_activations(x, logger=self.logger)
+
+            # H1: (640, 200) -> (320, 200)
+            h0_conv2d = tf_utils.conv2d(x, output_dim=self.conv_dims[0], initializer='He', logger=self.logger,
+                                        name='h0_conv2d')
+            h0_lrelu = tf_utils.lrelu(h0_conv2d, logger=self.logger, name='h0_lrelu')
+
+            # H2: (320, 200) -> (160, 100)
+            h1_conv2d = tf_utils.conv2d(h0_lrelu, output_dim=self.conv_dims[1], initializer='He', logger=self.logger,
+                                        name='h1_conv2d')
+            h1_norm = tf_utils.norm(h1_conv2d, _type=self.norm, _ops=self._ops, logger=self.logger, name='h1_norm')
+            h1_lrelu = tf_utils.lrelu(h1_norm, logger=self.logger, name='h1_lrelu')
+
+            # H3: (160, 100) -> (80, 50)
+            h2_conv2d = tf_utils.conv2d(h1_lrelu, output_dim=self.conv_dims[2], initializer='He', logger=self.logger,
+                                        name='h2_conv2d')
+            h2_norm = tf_utils.norm(h2_conv2d, _type=self.norm, _ops=self._ops, logger=self.logger, name='h2_norm')
+            h2_lrelu = tf_utils.lrelu(h2_norm, logger=self.logger, name='h2_lrelu')
+
+            # H4: (80, 50) -> (40, 25)
+            h3_conv2d = tf_utils.conv2d(h2_lrelu, output_dim=self.conv_dims[3], initializer='He', logger=self.logger,
+                                        name='h3_conv2d')
+            h3_norm = tf_utils.norm(h3_conv2d, _type=self.norm, _ops=self._ops, logger=self.logger, name='h3_norm')
+            h3_lrelu = tf_utils.lrelu(h3_norm, logger=self.logger, name='h3_lrelu')
+
+            # H5: (40, 25) -> (20, 13)
+            h4_conv2d = tf_utils.conv2d(h3_lrelu, output_dim=self.conv_dims[4], initializer='He', logger=self.logger,
+                                        name='h4_conv2d')
+            h4_norm = tf_utils.norm(h4_conv2d, _type=self.norm, _ops=self._ops, logger=self.logger, name='h4_norm')
+            h4_lrelu = tf_utils.lrelu(h4_norm, logger=self.logger, name='h4_lrelu')
+
+            # H6: (20, 13) -> (20, 13)
+            output = tf_utils.conv2d(h3_lrelu, output_dim=self.conv_dims[5], k_h=3, k_w=3, d_h=1, d_w=1,
+                                     initializer='He', logger=self.logger, name='output_conv2d')
+
+            # set reuse=True for next call
+            self.reuse = True
+            self.variables = tf.compat.v1.get_collection(tf.compat.v1.GraphKeys.TRAINABLE_VARIABLES, scope=self.name)
+
+        return output

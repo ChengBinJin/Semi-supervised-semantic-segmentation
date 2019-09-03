@@ -20,14 +20,14 @@ tf.flags.DEFINE_integer('batch_size', 1, 'batch size for one iteration, default:
 tf.flags.DEFINE_float('resize_factor', 1.0, 'resize original input image, default: 1.0')
 tf.flags.DEFINE_bool('multi_test', True, 'multiple rotation feedforwards for test stage, default: False')
 tf.flags.DEFINE_bool('use_dice_loss', False, 'use dice coefficient loss or not, default: False')
-tf.flags.DEFINE_float('lambda_one', 0., 'balancing parameter for the data loss, default: 10.')
+tf.flags.DEFINE_float('lambda_one', 10., 'balancing parameter for the data loss, default: 10.')
 tf.flags.DEFINE_float('lambda_two', 0., 'balancing parameter for the dice coefficient loss, default: 1.')
 tf.flags.DEFINE_string('dataset', 'OpenEDS', 'dataset name, default: OpenEDS')
 tf.flags.DEFINE_bool('is_train', True, 'training or inference mode, default: True')
 tf.flags.DEFINE_float('learning_rate', 2e-4, 'initial learning rate for optimizer, default: 0.0002')
-tf.flags.DEFINE_integer('iters', 400, 'number of iterations, default: 200,000')
-tf.flags.DEFINE_integer('print_freq', 20, 'print frequency for loss information, default: 20')
-tf.flags.DEFINE_integer('sample_freq', 20, 'sample frequence for checking qualitative evaluation, default: 100')
+tf.flags.DEFINE_integer('iters', 200000, 'number of iterations, default: 200,000')
+tf.flags.DEFINE_integer('print_freq', 50, 'print frequency for loss information, default: 20')
+tf.flags.DEFINE_integer('sample_freq', 500, 'sample frequence for checking qualitative evaluation, default: 100')
 tf.flags.DEFINE_integer('eval_freq', 2000, 'evaluation frequencey for evaluation of the batch accuracy, default: 2000')
 tf.flags.DEFINE_string('load_model', None, 'folder of saved model that you wish to continue training '
                                            '(e.g. 20190831-194923), default: None')
@@ -119,8 +119,8 @@ def train(solver, saver, logger, model_dir, log_dir, sample_dir):
 
             # Print loss information
             if (iter_time % FLAGS.print_freq == 0) or (iter_time + 1 == FLAGS.iters):
-                msg = "[{0:6} / {1:6}] TotalLoss: {2:.3f}, DataLoss: {3:.3f}, GenLoss: {4:.3f}, " \
-                      "DiceLoss: {5:.3f}, DisLoss: {6:.3f}"
+                msg = "[{0:6} / {1:6}] TotalLoss: {2:.4f}, DataLoss: {3:.4f}, GenLoss: {4:.4f}, " \
+                      "DiceLoss: {5:.4f}, DisLoss: {6:.4f}"
                 print(msg.format(iter_time, FLAGS.iters, total_loss, data_loss, gen_loss, dice_loss, dis_loss))
 
             # Sampling predictive results

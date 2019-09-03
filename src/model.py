@@ -67,7 +67,7 @@ class Model(object):
         # Input placeholders
         self.input_img_tfph = tf.compat.v1.placeholder(tf.float32, shape=[None, *self.input_shape], name='input_tfph')
         self.rate_tfph = tf.compat.v1.placeholder(tf.float32, name='keep_prob_tfph')
-        self.train_mode_tfph = tf.compat.v1.placeholder(tf.bool, name='train_mode_ph')
+        # self.train_mode_tfph = tf.compat.v1.placeholder(tf.bool, name='train_mode_ph')
 
         # Initialize TFRecoder reader
         train_reader = Reader(tfrecords_file=self.data_path[0],
@@ -87,16 +87,13 @@ class Model(object):
                                      _ops=self.dis_ops)
 
         # Network forward for training
-        self.pred_train, gen_output = self.gen_obj(input_img=self.normalize(self.img_train),
-                                                   train_mode=self.train_mode_tfph,
-                                                   keep_rate=self.rate_tfph)
+        self.pred_train, self.gen_output = self.gen_obj(input_img=self.normalize(self.img_train), keep_rate=self.rate_tfph)
         self.pred_cls_train = tf.math.argmax(self.pred_train, axis=-1)
 
         # Concatenation
-        self.real_pair = tf.concat(
-            [self.normalize(self.img_train), self.transform_seg(self.seg_img_train)], axis=3)
-        self.fake_pair = tf.concat(
-            [self.normalize(self.img_train), gen_output], axis=3)
+        self.real_img = self.transform_seg(self.seg_img_train)
+        self.real_pair = tf.concat([self.normalize(self.img_train), self.real_img], axis=3)
+        self.fake_pair = tf.concat([self.normalize(self.img_train), self.gen_output], axis=3)
         # self.fake_pair_2 = tf.concat([tf.random.shuffle(self.normalize(self.img_train)),
         #                               tf.random.shuffle(self.transform_seg(self.seg_img_train))], axis=3)
         # self.fake_pair = tf.concat([self.fake_pair_1, self.fake_pair_2], axis=0)
@@ -207,14 +204,13 @@ class Model(object):
             img_val_2 = tf.slice(img_val, begin=[self.num_try, 0, 0, 0], size=[self.num_try, h, w, c])
 
             # Network forward for validation data
-            pred_val_1, _ = self.gen_obj(input_img=self.normalize(img_val_1), train_mode=self.train_mode_tfph,
+            pred_val_1, _ = self.gen_obj(input_img=self.normalize(img_val_1),
                                          keep_rate=self.rate_tfph)
-            pred_val_2, _ = self.gen_obj(input_img=self.normalize(img_val_2), train_mode=self.train_mode_tfph,
+            pred_val_2, _ = self.gen_obj(input_img=self.normalize(img_val_2),
                                          keep_rate=self.rate_tfph)
             pred_val = tf.concat(values=[pred_val_1, pred_val_2], axis=0)
         else:
             pred_val, _ = self.gen_obj(input_img=self.normalize(img_val),
-                                       train_mode=self.train_mode_tfph,
                                        keep_rate=self.rate_tfph)
 
         # Since multi_test, we need inversely rotate back to the original segImg
@@ -348,13 +344,13 @@ class Model(object):
             img_test_2 = tf.slice(img_test, begin=[self.num_try, 0, 0, 0], size=[self.num_try, h, w, c])
 
             # Network forward for test data
-            pred_test_1, _ = self.gen_obj(input_img=self.normalize(img_test_1), train_mode=self.train_mode_tfph,
+            pred_test_1, _ = self.gen_obj(input_img=self.normalize(img_test_1),
                                           keep_rate=self.rate_tfph)
-            pred_test_2, _ = self.gen_obj(input_img=self.normalize(img_test_2), train_mode=self.train_mode_tfph,
+            pred_test_2, _ = self.gen_obj(input_img=self.normalize(img_test_2),
                                           keep_rate=self.rate_tfph)
             pred_test = tf.concat(values=[pred_test_1, pred_test_2], axis=0)
         else:
-            pred_test, _ = self.gen_obj(input_img=self.normalize(img_test), train_mode=self.train_mode_tfph,
+            pred_test, _ = self.gen_obj(input_img=self.normalize(img_test),
                                         keep_rate=self.rate_tfph)
 
         # Since multi_test, we need inversely rotate back to the original segImg
@@ -451,13 +447,13 @@ class Model(object):
     def normalize(data):
         return data / 127.5 - 1.0
 
-    def transform_seg(self, img):
+    @staticmethod
+    def transform_seg(img):
         # label 0~3
         # img = img * 255. / (self.num_classes - 1)
         # img = img / 127.5 - 1.
         # img  = img * 2. - 1.
-        img = 1. - tf.cast(tf.math.equal(img, tf.zeros_like(img)), dtype=tf.float32)
-        print('img shape: {}'.format(img.get_shape().as_list()))
+        img = 1. - 2. * tf.cast(tf.math.equal(img, tf.zeros_like(img)), dtype=tf.float32)
         return img
 
     def convert_one_hot(self, data):
@@ -705,14 +701,17 @@ class Generator(object):
                 output = tf_utils.conv2d(s9_conv3, output_dim=self.num_classes, k_h=1, k_w=1, d_h=1, d_w=1,
                                          padding=self.padding, initializer='He', name='output', logger=self.logger)
 
-            gen_output = tf_utils.conv2d(output, output_dim=1, k_h=1, k_w=1, d_h=1, d_w=1, padding=self.padding,
-                                         initializer='He', name='gen_outupt', logger=self.logger)
+            gen_output = tf_utils.norm(output, name='gen_output_norm', _type=self.norm, _ops=self._ops,
+                                       is_train=train_mode, logger=self.logger)
+            gen_output = tf_utils.relu(gen_output, name='relu_gen_output', logger=self.logger)
+            gen_output = tf_utils.conv2d(gen_output, output_dim=1, k_h=1, k_w=1, d_h=1, d_w=1,
+                                         padding=self.padding, initializer='He', name='gen_output', logger=self.logger)
 
             # set reuse=True for next call
             self.reuse = True
             self.variables = tf.compat.v1.get_collection(tf.compat.v1.GraphKeys.TRAINABLE_VARIABLES, scope=self.name)
 
-            return output, tf_utils.sigmoid(gen_output)
+            return output, tf_utils.tanh(gen_output)
 
 
 class Discriminator(object):

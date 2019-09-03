@@ -107,8 +107,8 @@ def save_imgs(img_stores, iter_time=None, save_dir=None, margin=5, img_name=None
     for i in range(num_categories):
         if img_stores[i].shape[-1] == 1:
             img_stores[i] = np.squeeze(img_stores[i], axis=-1)
-
-        img_stores[i] = img_stores[i].astype(np.uint8)
+        elif i == 2 or i == 3:  # labels
+            img_stores[i] = img_stores[i].astype(np.uint8)
 
     num_imgs, h, w = img_stores[0].shape
 
@@ -118,25 +118,32 @@ def save_imgs(img_stores, iter_time=None, save_dir=None, margin=5, img_name=None
 
         for i in range(num_imgs):
             for j in range(num_categories):
-                if j != 0:  # label map
+                if j == 0:      # gray-scale image
+                    canvas[(j + 1) * margin + j * h:(j + 1) * margin + (j + 1) * h,
+                    (i + 1) * margin + i * w:(i + 1) * (margin + w), :] = \
+                        np.dstack((img_stores[j][i], img_stores[j][i], img_stores[j][i]))
+                elif j <= 2:    # label maps
                     canvas[(j+1)*margin+j*h:(j+1)*margin+(j+1)*h, (i+1)*margin+i*w:(i+1)*(margin+w), :] = \
                         convert_color_label(img_stores[j][i])
-                else:
+                else:           # adversarial images
                     canvas[(j+1)*margin+j*h:(j+1)*margin+(j+1)*h, (i+1)*margin+i*w:(i+1)*(margin+w), :] = \
-                        np.dstack((img_stores[j][i], img_stores[j][i], img_stores[j][i]))
-
+                        np.dstack((255.*img_stores[j][i], 255.*img_stores[j][i], 255.*img_stores[j][i]))
     else:
         canvas = np.zeros((num_imgs * h + (num_imgs + 1) * margin,
                            num_categories * w + (num_categories + 1) * margin, 3), dtype=np.uint8)
 
         for i in range(num_imgs):
             for j in range(num_categories):
-                if j != 0:
+                if j == 0:          # gray-scale image
+                    canvas[(i+1)*margin+i*h:(i+1)*(margin+h), (j+1)*margin+j*w:(j+1)*margin+(j+1)*w, :] = \
+                        np.dstack((img_stores[j][i], img_stores[j][i], img_stores[j][i]))
+                elif j <= 2:        # label maps
                     canvas[(i+1)*margin+i*h:(i+1)*(margin+h), (j+1)*margin+j*w:(j+1)*margin+(j+1)*w, :] = \
                         convert_color_label(img_stores[j][i])
                 else:
+                    img = (img_stores[j][i] + 1.) * 127.5
                     canvas[(i+1)*margin+i*h:(i+1)*(margin+h), (j+1)*margin+j*w:(j+1)*margin+(j+1)*w, :] = \
-                        np.dstack((img_stores[j][i], img_stores[j][i], img_stores[j][i]))
+                        np.dstack((img, img, img))
 
     if img_name is None:
         cv2.imwrite(os.path.join(save_dir, str(iter_time).zfill(6) + '.png'), canvas)

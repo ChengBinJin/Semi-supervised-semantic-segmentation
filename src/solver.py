@@ -220,16 +220,14 @@ class Solver(object):
             self.model.rate_tfph: 0.5,  # rate: 1 - keep_prob
         }
 
-        img, pred_cls, seg_img, gen_output, real_img = self.sess.run(
-            [self.model.img_train, self.model.pred_cls_train, self.model.seg_img_train,
-             self.model.gen_output, self.model.real_img], feed_dict=feed)
+        img, pred_cls, seg_img = self.sess.run(
+            [self.model.img_train, self.model.pred_cls_train, self.model.seg_img_train], feed_dict=feed)
 
         # if batch_size is bigger than num_imgs, we just show num_imgs
         num_imgs = np.minimum(num_imgs, img.shape[0])
 
         # Save imgs
-        utils.save_imgs(img_stores=[img[:num_imgs], pred_cls[:num_imgs], seg_img[:num_imgs],
-                                    gen_output[:num_imgs], real_img[:num_imgs]],
+        utils.save_imgs(img_stores=[img[:num_imgs], pred_cls[:num_imgs], seg_img[:num_imgs]],
                         iter_time=iter_time,
                         save_dir=save_dir,
                         is_vertical=False)

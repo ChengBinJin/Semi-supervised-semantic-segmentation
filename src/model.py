@@ -447,13 +447,13 @@ class Model(object):
     def normalize(data):
         return data / 127.5 - 1.0
 
-    @staticmethod
-    def transform_seg(img):
+    def transform_seg(self, img):
         # label 0~3
         # img = img * 255. / (self.num_classes - 1)
         # img = img / 127.5 - 1.
         # img  = img * 2. - 1.
-        img = 1. - 2. * tf.cast(tf.math.equal(img, tf.zeros_like(img)), dtype=tf.float32)
+        # img = 1. - 2. * tf.cast(tf.math.equal(img, tf.zeros_like(img)), dtype=tf.float32)
+        img = self.convert_one_hot(img) * 2. - 1.
         return img
 
     def convert_one_hot(self, data):
@@ -701,17 +701,17 @@ class Generator(object):
                 output = tf_utils.conv2d(s9_conv3, output_dim=self.num_classes, k_h=1, k_w=1, d_h=1, d_w=1,
                                          padding=self.padding, initializer='He', name='output', logger=self.logger)
 
-            gen_output = tf_utils.norm(output, name='gen_output_norm', _type=self.norm, _ops=self._ops,
-                                       is_train=train_mode, logger=self.logger)
-            gen_output = tf_utils.relu(gen_output, name='relu_gen_output', logger=self.logger)
-            gen_output = tf_utils.conv2d(gen_output, output_dim=1, k_h=1, k_w=1, d_h=1, d_w=1,
-                                         padding=self.padding, initializer='He', name='gen_output', logger=self.logger)
+            # gen_output = tf_utils.norm(output, name='gen_output_norm', _type=self.norm, _ops=self._ops,
+            #                            is_train=train_mode, logger=self.logger)
+            # gen_output = tf_utils.relu(gen_output, name='relu_gen_output', logger=self.logger)
+            # gen_output = tf_utils.conv2d(gen_output, output_dim=1, k_h=1, k_w=1, d_h=1, d_w=1,
+            #                              padding=self.padding, initializer='He', name='gen_output', logger=self.logger)
 
             # set reuse=True for next call
             self.reuse = True
             self.variables = tf.compat.v1.get_collection(tf.compat.v1.GraphKeys.TRAINABLE_VARIABLES, scope=self.name)
 
-            return output, tf_utils.tanh(gen_output)
+            return output, tf_utils.tanh(output)
 
 
 class Discriminator(object):

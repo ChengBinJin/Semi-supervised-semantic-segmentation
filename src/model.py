@@ -87,13 +87,15 @@ class Model(object):
                                      _ops=self.dis_ops)
 
         # Network forward for training
-        self.pred_train, self.gen_output = self.gen_obj(input_img=self.normalize(self.img_train), keep_rate=self.rate_tfph)
-        self.pred_cls_train = tf.math.argmax(self.pred_train, axis=-1)
+        self.pred_train = self.gen_obj(input_img=self.normalize(self.img_train), keep_rate=self.rate_tfph)
+        # self.pred_cls_train = tf.math.argmax(self.pred_train, axis=-1)
+        self.pred_cls_train = self.soft_argmax(self.pred_train)
 
         # Concatenation
-        self.real_img = self.transform_seg(self.seg_img_train)
+        self.real_img = self.transform_seg(self.seg_img_train, expand_dims=False)
+        self.fake_img = self.transform_seg(self.pred_cls_train, expand_dims=True)
         self.real_pair = tf.concat([self.normalize(self.img_train), self.real_img], axis=3)
-        self.fake_pair = tf.concat([self.normalize(self.img_train), self.gen_output], axis=3)
+        self.fake_pair = tf.concat([self.normalize(self.img_train), self.fake_img], axis=3)
         # self.fake_pair_2 = tf.concat([tf.random.shuffle(self.normalize(self.img_train)),
         #                               tf.random.shuffle(self.transform_seg(self.seg_img_train))], axis=3)
         # self.fake_pair = tf.concat([self.fake_pair_1, self.fake_pair_2], axis=0)
@@ -128,6 +130,25 @@ class Model(object):
         dis_train_op = self.init_optimizer(loss=self.dis_loss, variables=self.dis_obj.variables, name='Adam_dis')
         dis_train_ops = [dis_train_op] + self.dis_ops
         self.dis_optim = tf.group(*dis_train_ops)
+
+    def transform_seg(self, img, expand_dims=False):
+        # # label 0~3
+        img = img * 255. / (self.num_classes - 1)
+        img = img / 127.5 - 1.
+        # # img  = img * 2. - 1.
+        # # img = 1. - 2. * tf.cast(tf.math.equal(img, tf.zeros_like(img)), dtype=tf.float32)
+        # # img = self.convert_one_hot(img) * 2. - 1.
+        if expand_dims:
+            img = tf.expand_dims(img, axis=-1)
+        return img
+
+    @staticmethod
+    def soft_argmax(x, beta=1e2):
+        # Psedu-math for the below
+        # y = sum( i * exp(beta * x[i])  ) / sum( exp(beta * x[i]) )
+        x_range = tf.range(x.shape.as_list()[-1], dtype=x.dtype)
+        y = tf.math.reduce_sum(tf.nn.softmax(x * beta) * x_range, axis=-1)
+        return y
 
     @staticmethod
     def generator_loss(dis_obj, fake_img):
@@ -204,13 +225,13 @@ class Model(object):
             img_val_2 = tf.slice(img_val, begin=[self.num_try, 0, 0, 0], size=[self.num_try, h, w, c])
 
             # Network forward for validation data
-            pred_val_1, _ = self.gen_obj(input_img=self.normalize(img_val_1),
+            pred_val_1 = self.gen_obj(input_img=self.normalize(img_val_1),
                                          keep_rate=self.rate_tfph)
-            pred_val_2, _ = self.gen_obj(input_img=self.normalize(img_val_2),
+            pred_val_2 = self.gen_obj(input_img=self.normalize(img_val_2),
                                          keep_rate=self.rate_tfph)
             pred_val = tf.concat(values=[pred_val_1, pred_val_2], axis=0)
         else:
-            pred_val, _ = self.gen_obj(input_img=self.normalize(img_val),
+            pred_val = self.gen_obj(input_img=self.normalize(img_val),
                                        keep_rate=self.rate_tfph)
 
         # Since multi_test, we need inversely rotate back to the original segImg
@@ -344,13 +365,13 @@ class Model(object):
             img_test_2 = tf.slice(img_test, begin=[self.num_try, 0, 0, 0], size=[self.num_try, h, w, c])
 
             # Network forward for test data
-            pred_test_1, _ = self.gen_obj(input_img=self.normalize(img_test_1),
+            pred_test_1 = self.gen_obj(input_img=self.normalize(img_test_1),
                                           keep_rate=self.rate_tfph)
-            pred_test_2, _ = self.gen_obj(input_img=self.normalize(img_test_2),
+            pred_test_2 = self.gen_obj(input_img=self.normalize(img_test_2),
                                           keep_rate=self.rate_tfph)
             pred_test = tf.concat(values=[pred_test_1, pred_test_2], axis=0)
         else:
-            pred_test, _ = self.gen_obj(input_img=self.normalize(img_test),
+            pred_test = self.gen_obj(input_img=self.normalize(img_test),
                                         keep_rate=self.rate_tfph)
 
         # Since multi_test, we need inversely rotate back to the original segImg
@@ -446,15 +467,6 @@ class Model(object):
     @staticmethod
     def normalize(data):
         return data / 127.5 - 1.0
-
-    def transform_seg(self, img):
-        # label 0~3
-        # img = img * 255. / (self.num_classes - 1)
-        # img = img / 127.5 - 1.
-        # img  = img * 2. - 1.
-        # img = 1. - 2. * tf.cast(tf.math.equal(img, tf.zeros_like(img)), dtype=tf.float32)
-        img = self.convert_one_hot(img) * 2. - 1.
-        return img
 
     def convert_one_hot(self, data):
         shape = data.get_shape().as_list()
@@ -701,17 +713,11 @@ class Generator(object):
                 output = tf_utils.conv2d(s9_conv3, output_dim=self.num_classes, k_h=1, k_w=1, d_h=1, d_w=1,
                                          padding=self.padding, initializer='He', name='output', logger=self.logger)
 
-            # gen_output = tf_utils.norm(output, name='gen_output_norm', _type=self.norm, _ops=self._ops,
-            #                            is_train=train_mode, logger=self.logger)
-            # gen_output = tf_utils.relu(gen_output, name='relu_gen_output', logger=self.logger)
-            # gen_output = tf_utils.conv2d(gen_output, output_dim=1, k_h=1, k_w=1, d_h=1, d_w=1,
-            #                              padding=self.padding, initializer='He', name='gen_output', logger=self.logger)
-
             # set reuse=True for next call
             self.reuse = True
             self.variables = tf.compat.v1.get_collection(tf.compat.v1.GraphKeys.TRAINABLE_VARIABLES, scope=self.name)
 
-            return output, tf_utils.tanh(output)
+            return output
 
 
 class Discriminator(object):

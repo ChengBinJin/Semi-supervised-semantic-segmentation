@@ -9,7 +9,7 @@ import tensorflow as tf
 
 class Reader(object):
     def __init__(self, tfrecords_file, decode_img_shape=(320, 400, 1), img_shape=(320, 200, 1), batch_size=1,
-                 min_queue_examples=100, num_threads=8, name='DataReader'):
+                 min_queue_examples=200, num_threads=8, name='DataReader'):
         self.tfrecords_file = tfrecords_file
         self.decode_img_shape = decode_img_shape
         self.img_shape = img_shape
@@ -42,7 +42,9 @@ class Reader(object):
             image = tf.image.decode_jpeg(image_buffer, channels=self.img_shape[2])
 
             # Resize to 2D
-            image = tf.image.resize(image, size=(self.decode_img_shape[0], self.decode_img_shape[1]))
+            # image = tf.image.resize(image, size=(self.decode_img_shape[0], self.decode_img_shape[1]))
+            image = tf.cast(tf.image.resize(image, size=(self.decode_img_shape[0], self.decode_img_shape[1]),
+                                    method=tf.image.ResizeMethod.NEAREST_NEIGHBOR), dtype=tf.float32)
 
             # Split to two images
             self.img_ori, self.seg_img_ori = tf.split(image, num_or_size_splits=[self.img_shape[1], self.img_shape[1]],

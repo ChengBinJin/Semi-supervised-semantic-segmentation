@@ -16,7 +16,7 @@ from solver import Solver
 FLAGS = tf.flags.FLAGS
 tf.flags.DEFINE_string('gpu_index', '0', 'gpu index if you have multiple gpus, default: 0')
 tf.flags.DEFINE_string('method', 'U-Net', 'Segmentation model, default: U-Net')
-tf.flags.DEFINE_integer('batch_size', 1, 'batch size for one iteration, default: 16')
+tf.flags.DEFINE_integer('batch_size', 8, 'batch size for one iteration, default: 8')
 tf.flags.DEFINE_float('resize_factor', 1.0, 'resize original input image, default: 1.0')
 tf.flags.DEFINE_bool('multi_test', True, 'multiple rotation feedforwards for test stage, default: False')
 tf.flags.DEFINE_bool('use_dice_loss', False, 'use dice coefficient loss or not, default: False')
@@ -25,10 +25,10 @@ tf.flags.DEFINE_float('lambda_two', 0., 'balancing parameter for the dice coeffi
 tf.flags.DEFINE_string('dataset', 'OpenEDS', 'dataset name, default: OpenEDS')
 tf.flags.DEFINE_bool('is_train', True, 'training or inference mode, default: True')
 tf.flags.DEFINE_float('learning_rate', 2e-4, 'initial learning rate for optimizer, default: 0.0002')
-tf.flags.DEFINE_integer('iters', 200000, 'number of iterations, default: 200,000')
-tf.flags.DEFINE_integer('print_freq', 50, 'print frequency for loss information, default: 20')
-tf.flags.DEFINE_integer('sample_freq', 100, 'sample frequence for checking qualitative evaluation, default: 100')
-tf.flags.DEFINE_integer('eval_freq', 2000, 'evaluation frequencey for evaluation of the batch accuracy, default: 2000')
+tf.flags.DEFINE_integer('iters', 400000, 'number of iterations, default: 400,000')
+tf.flags.DEFINE_integer('print_freq', 50, 'print frequency for loss information, default: 50')
+tf.flags.DEFINE_integer('sample_freq', 250, 'sample frequence for checking qualitative evaluation, default: 250')
+tf.flags.DEFINE_integer('eval_freq', 4000, 'evaluation frequencey for evaluation of the batch accuracy, default: 2000')
 tf.flags.DEFINE_string('load_model', None, 'folder of saved model that you wish to continue training '
                                            '(e.g. 20190831-194923), default: None')
 
@@ -127,40 +127,40 @@ def train(solver, saver, logger, model_dir, log_dir, sample_dir):
             if (iter_time % FLAGS.sample_freq == 0) or (iter_time + 1 == FLAGS.iters):
                 solver.sample(iter_time, sample_dir)
 
-            # # Evaluat models using validation dataset
-            # if (iter_time % FLAGS.eval_freq) == 0 or (iter_time + 1 == FLAGS.iters):
-            #     mIoU, acc, _, precision, recall, f1_score = solver.eval(
-            #         tb_writer=tb_writer, iter_time=iter_time, save_dir=None)
-            #
-            #     if best_acc < acc:
-            #         best_acc = acc
-            #         solver.set_best_acc(best_acc)
-            #
-            #     if best_precision < precision:
-            #         best_precision = precision
-            #         solver.set_best_precision(best_precision)
-            #
-            #     if best_recall < recall:
-            #         best_recall = recall
-            #         solver.set_best_recall(best_recall)
-            #
-            #     if best_f1_score < f1_score:
-            #         best_f1_score = f1_score
-            #         solver.set_best_f1_score(best_f1_score)
-            #
-            #     if best_mIoU < mIoU:
-            #         best_mIoU = mIoU
-            #         solver.set_best_mIoU(best_mIoU)
-            #         save_model(saver, solver, logger, model_dir, iter_time, best_mIoU)
-            #
-            #     print("\n")
-            #     print("*"*70)
-            #     print('mIoU:      {:.3f} - Best mIoU:      {:.3f}'.format(mIoU, best_mIoU))
-            #     print('Acc.:      {:.3f} - Best Acc.:      {:.3f}'.format(acc, best_acc))
-            #     print("Precision: {:.3f} - Best Precision: {:.3f}".format(precision, best_precision))
-            #     print("Recall:    {:.3f} - Best Recall:    {:.3f}".format(recall, best_recall))
-            #     print("F1 score:  {:.3f} - Best F1 score:  {:.3f}".format(f1_score, best_f1_score))
-            #     print("*"*70)
+            # Evaluat models using validation dataset
+            if (iter_time % FLAGS.eval_freq) == 0 or (iter_time + 1 == FLAGS.iters):
+                mIoU, acc, _, precision, recall, f1_score = solver.eval(
+                    tb_writer=tb_writer, iter_time=iter_time, save_dir=None)
+
+                if best_acc < acc:
+                    best_acc = acc
+                    solver.set_best_acc(best_acc)
+
+                if best_precision < precision:
+                    best_precision = precision
+                    solver.set_best_precision(best_precision)
+
+                if best_recall < recall:
+                    best_recall = recall
+                    solver.set_best_recall(best_recall)
+
+                if best_f1_score < f1_score:
+                    best_f1_score = f1_score
+                    solver.set_best_f1_score(best_f1_score)
+
+                if best_mIoU < mIoU:
+                    best_mIoU = mIoU
+                    solver.set_best_mIoU(best_mIoU)
+                    save_model(saver, solver, logger, model_dir, iter_time, best_mIoU)
+
+                print("\n")
+                print("*"*70)
+                print('mIoU:      {:.3f} - Best mIoU:      {:.3f}'.format(mIoU, best_mIoU))
+                print('Acc.:      {:.3f} - Best Acc.:      {:.3f}'.format(acc, best_acc))
+                print("Precision: {:.3f} - Best Precision: {:.3f}".format(precision, best_precision))
+                print("Recall:    {:.3f} - Best Recall:    {:.3f}".format(recall, best_recall))
+                print("F1 score:  {:.3f} - Best F1 score:  {:.3f}".format(f1_score, best_f1_score))
+                print("*"*70)
 
             iter_time += 1
 

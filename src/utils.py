@@ -116,11 +116,14 @@ def save_imgs(img_stores, iter_time=None, save_dir=None, margin=5, img_name=None
 
         for i in range(num_imgs):
             for j in range(num_categories):
-                if j == 0:      # gray-scale image
+                if j == 0:          # gray-scale image
                     canvas[(j + 1) * margin + j * h:(j + 1) * margin + (j + 1) * h,
                     (i + 1) * margin + i * w:(i + 1) * (margin + w), :] = \
                         np.dstack((img_stores[j][i], img_stores[j][i], img_stores[j][i]))
-                else:           # label maps
+                elif j==1:           # soft-argmax maps
+                    canvas[(j+1)*margin+j*h:(j+1)*margin+(j+1)*h, (i+1)*margin+i*w:(i+1)*(margin+w), :] = \
+                        convert_color_label(np.round(img_stores[j][i]))
+                else:
                     canvas[(j+1)*margin+j*h:(j+1)*margin+(j+1)*h, (i+1)*margin+i*w:(i+1)*(margin+w), :] = \
                         convert_color_label(img_stores[j][i])
     else:
@@ -136,15 +139,9 @@ def save_imgs(img_stores, iter_time=None, save_dir=None, margin=5, img_name=None
                     canvas[(i + 1) * margin + i * h:(i + 1) * (margin + h),
                     (j + 1) * margin + j * w:(j + 1) * margin + (j + 1) * w, :] = \
                         convert_color_label(np.round(img_stores[j][i]))
-                elif j == 2:            # label maps
+                else:            # label maps
                     canvas[(i+1)*margin+i*h:(i+1)*(margin+h), (j+1)*margin+j*w:(j+1)*margin+(j+1)*w, :] = \
                         convert_color_label(img_stores[j][i])
-                else:
-                    img = img_stores[j][i]
-                    img = inverse_transform_seg(img, n_classes=4)
-                    canvas[(i+1)*margin+i*h:(i+1)*(margin+h), (j+1)*margin+j*w:(j+1)*margin+(j+1)*w, :] = \
-                        convert_color_label(img)
-
 
     if img_name is None:
         cv2.imwrite(os.path.join(save_dir, str(iter_time).zfill(6) + '.png'), canvas)

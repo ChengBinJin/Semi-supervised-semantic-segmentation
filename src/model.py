@@ -150,11 +150,10 @@ class Model(object):
         y = tf.math.reduce_sum(tf.nn.softmax(x * beta) * x_range, axis=-1)
         return y
 
-    @staticmethod
-    def generator_loss(dis_obj, fake_img):
+    def generator_loss(self, dis_obj, fake_img):
         d_logit_fake = dis_obj(fake_img)
-        loss = tf.math.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(logits=d_logit_fake ,
-                                                                           labels=tf.ones_like(d_logit_fake)))
+        loss = (1. / self.lambda_one) * tf.math.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(
+            logits=d_logit_fake , labels=tf.ones_like(d_logit_fake)))
         return loss
 
     @staticmethod

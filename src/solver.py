@@ -81,7 +81,7 @@ class Solver(object):
         self.sess.run(self.model.running_vars_initializer)
 
         per_cla_acc_mat = None
-        for iter_time in range(self.data.num_val_imgs):
+        for idx in range(self.data.num_val_imgs):
             img_s1, img_s2, pred_s1, pred_s2, seg_img_s1, seg_img_s2 = None, None, None, None, None, None
 
             if self.multi_test:
@@ -91,8 +91,8 @@ class Solver(object):
                 _, _, _, _, per_cla_acc_mat, img, pred_cls, seg_img, img_name, user_id = \
                     self.sess.run(run_ops, feed_dict=feed)
 
-            if iter_time % 100 == 0:
-                msg  = "\r - Evaluating progress: {:.2f}%".format((iter_time/self.data.num_val_imgs)*100.)
+            if idx % 100 == 0:
+                msg  = "\r - Evaluating progress: {:.2f}%".format((idx/self.data.num_val_imgs)*100.)
 
                 # Print it.
                 sys.stdout.write(msg)

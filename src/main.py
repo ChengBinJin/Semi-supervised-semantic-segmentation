@@ -25,10 +25,10 @@ tf.flags.DEFINE_float('lambda_two', 0., 'balancing parameter for the dice coeffi
 tf.flags.DEFINE_string('dataset', 'OpenEDS', 'dataset name, default: OpenEDS')
 tf.flags.DEFINE_bool('is_train', True, 'training or inference mode, default: True')
 tf.flags.DEFINE_float('learning_rate', 2e-4, 'initial learning rate for optimizer, default: 0.0002')
-tf.flags.DEFINE_integer('iters', 400000, 'number of iterations, default: 400,000')
-tf.flags.DEFINE_integer('print_freq', 50, 'print frequency for loss information, default: 50')
+tf.flags.DEFINE_integer('iters', 20, 'number of iterations, default: 400,000')
+tf.flags.DEFINE_integer('print_freq', 5, 'print frequency for loss information, default: 50')
 tf.flags.DEFINE_integer('sample_freq', 250, 'sample frequence for checking qualitative evaluation, default: 250')
-tf.flags.DEFINE_integer('eval_freq', 4000, 'evaluation frequencey for evaluation of the batch accuracy, default: 2000')
+tf.flags.DEFINE_integer('eval_freq', 4000, 'evaluation frequencey for evaluation of the batch accuracy, default: 4000')
 tf.flags.DEFINE_string('load_model', None, 'folder of saved model that you wish to continue training '
                                            '(e.g. 20190831-194923), default: None')
 

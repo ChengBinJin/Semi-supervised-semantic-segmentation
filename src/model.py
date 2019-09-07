@@ -47,7 +47,7 @@ class Model(object):
         self.name = name
 
         self.mIoU_metric, self.mIoU_metric_update = None, None
-        self.tb_lr = None
+        self.tb_lr = list()
         self.gen_ops = list()
         self.dis_ops = list()
 
@@ -439,10 +439,11 @@ class Model(object):
                                                                global_step - start_decay_step,
                                                                decay_steps, end_learning_rate, power=1.0),
                                      start_learning_rate))
-            self.tb_lr = tf.compat.v1.summary.scalar('learning_rate', learning_rate)
 
             learn_step = tf.compat.v1.train.AdamOptimizer(learning_rate=learning_rate, beta1=0.5).minimize(
                 loss, global_step=global_step, var_list=variables)
+
+        self.tb_lr.append(tf.compat.v1.summary.scalar('learning_rate/{}'.format(name), learning_rate))
 
         return learn_step
 
